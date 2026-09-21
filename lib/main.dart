@@ -1,360 +1,606 @@
-import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter_tapjoy/flutter_tapjoy.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:wireguard_flutter_plus/wireguard_flutter_plus.dart';
 
 void main() {
-  runApp(const HomeTunnelClientApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const DataStreamApp());
 }
 
-class HomeTunnelClientApp extends StatelessWidget {
-  const HomeTunnelClientApp({super.key});
+class DataStreamApp extends StatelessWidget {
+  const DataStreamApp({Super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'HomeTunnel Client',
+      title: 'DataStream',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        primaryColor: Colors.blueAccent,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: Colors.teal,
+        scaffoldBackgroundColor: const Color(0xFF0F172A), // Dark slate background
+        cardColor: const Color(0xFF1E293B),
+        useMaterial3: true,
       ),
-      home: const ClientHomePage(),
+      home: const MainNavigationScreen(userId: "user_12345"),
     );
   }
 }
 
-class ClientHomePage extends StatefulWidget {
-  const ClientHomePage({super.key});
+class MainNavigationScreen extends StatefulWidget {
+  final String userId;
+
+  const MainNavigationScreen({Super.key, required this.userId});
 
   @override
-  State<ClientHomePage> createState() => _ClientHomePageState();
+  State<MainNavigationScreen> createState() => _MainNavigationScreenState();
 }
 
-class _ClientHomePageState extends State<ClientHomePage> {
-  final TextEditingController _codeController = TextEditingController();
-  final String _backendUrl = "https://hometunnel-backend-render.onrender.com";
-  final wireguard = WireGuardFlutter.instance;
+class _MainNavigationScreenState extends State<MainNavigationScreen> {
+  int _currentIndex = 0;
+  double _userBalanceUsd = 0.00;
+  bool _isLoading = false;
+  TJPlacement? _offerwallPlacement;
 
-  StreamSubscription<VpnStage>? _vpnStageSubscription;
-
-  bool _isConnecting = false;
-  bool _isConnected = false;
-  String _statusMessage = "Disconnected";
-
-  String _clientPrivateKey = "";
-  String _clientPublicKey = "";
-  bool _keysReady = false;
-  bool _wgInitialized = false;
+  // Mock Active Tasks for "Earn Tasks" Tab
+  final List<Map<String, dynamic>> _activeTasks = [
+    {
+      'id': 'task_1',
+      'platform': 'Instagram',
+      'action': 'Follow Account',
+      'url': 'https://instagram.com/example',
+      'payoutUsd': 0.07, // 70% of 0.10 campaign cost
+    },
+    {
+      'id': 'task_2',
+      'platform': 'YouTube',
+      'action': 'Like & Comment',
+      'url': 'https://youtube.com/watch?v=example',
+      'payoutUsd': 0.14, // 70% of 0.20 campaign cost
+    },
+  ];
 
   @override
   void initState() {
     super.initState();
-    _generateWireGuardKeyPair();
+    _initTapjoy();
+    _fetchUserBalance();
+  }
+
+  // Initialize Tapjoy SDK
+  void _initTapjoy() {
+    TapJoyPlugin.shared.setConnectionResultHandler((connected) {
+      if (connected) {
+        debugPrint("Tapjoy Connected Successfully");
+        TapJoyPlugin.shared.setUserID(userID: widget.userId);
+        _loadOfferwallPlacement();
+      } else {
+        debugPrint("Tapjoy Connection Failed");
+      }
+    });
+
+    TapJoyPlugin.shared.connect(
+      androidApiKey: "YOUR_ANDROID_TAPJOY_SDK_KEY",
+      iOSApiKey: "YOUR_IOS_TAPJOY_SDK_KEY",
+      debug: true,
+    );
+  }
+
+  void _loadOfferwallPlacement() {
+    _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
+    _offerwallPlacement?.setHandler((event, error) {
+      if (event == TJPlacementEvent.requestSuccess) {
+        debugPrint("Placement content ready");
+      }
+    });
+    TapJoyPlugin.shared.addPlacement(placement: _offerwallPlacement!);
+  }
+
+  void _showOfferwall() {
+    if (_offerwallPlacement != null) {
+      _offerwallPlacement!.showContent();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Offerwall loading... Please try again.')),
+      );
+    }
+  }
+
+  Future<void> _fetchUserBalance() async {
+    setState(() => _isLoading = true);
+    try {
+      final response = await http.get(
+        Uri.parse('https://your-backend-api.com/api/user/${widget.userId}/balance'),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          _userBalanceUsd = (data['balanceUsd'] as num).toDouble();
+        });
+      }
+    } catch (e) {
+      debugPrint("Error fetching balance: $e");
+    } finally {
+      setState(() => _isLoading = false);
+    }
   }
 
   @override
-  void dispose() {
-    _vpnStageSubscription?.cancel();
-    _codeController.dispose();
-    super.dispose();
+  Widget build(BuildContext context) {
+    final screens = [
+      EsimStoreTab(
+        userBalanceUsd: _userBalanceUsd,
+        isLoading: _isLoading,
+        onRefreshBalance: _fetchUserBalance,
+        onShowOfferwall: _showOfferwall,
+        userId: widget.userId,
+      ),
+      EarnTasksTab(
+        tasks: _activeTasks,
+        userId: widget.userId,
+      ),
+      PromoteTab(
+        userId: widget.userId,
+        onCampaignCreated: _fetchUserBalance,
+      ),
+    ];
+
+    return Scaffold(
+      body: screens[_currentIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: (index) => setState(() => _currentIndex = index),
+        backgroundColor: const Color(0xFF1E293B),
+        selectedItemColor: Colors.tealAccent,
+        unselectedItemColor: Colors.white54,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.cell_tower),
+            label: 'eSIM & Wallet',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.task_alt),
+            label: 'Earn Data',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.campaign),
+            label: 'Promote',
+          ),
+        ],
+      ),
+    );
   }
+}
 
-  /// Generates a valid 32-byte raw Curve25519 key pair compatible with WireGuard
-  Future<void> _generateWireGuardKeyPair() async {
-    try {
-      final secureRandom = Random.secure();
-      final privateKeyBytes = Uint8List(32);
-      for (int i = 0; i < 32; i++) {
-        privateKeyBytes[i] = secureRandom.nextInt(256);
-      }
+// =============================================================================
+// TAB 1: ESIM STORE & WALLET HUB
+// =============================================================================
+class EsimStoreTab extends StatelessWidget {
+  final double userBalanceUsd;
+  final bool isLoading;
+  final VoidCallback onRefreshBalance;
+  final VoidCallback onShowOfferwall;
+  final String userId;
 
-      // Clamp private key as per Curve25519 specification
-      privateKeyBytes[0] &= 248;
-      privateKeyBytes[31] &= 127;
-      privateKeyBytes[31] |= 64;
+  EsimStoreTab({
+    Super.key,
+    required this.userBalanceUsd,
+    required this.isLoading,
+    required this.onRefreshBalance,
+    required this.onShowOfferwall,
+    required this.userId,
+  });
 
-      // Compute public key using basepoint mult
-      final publicKeyBytes = _curve25519BasePointMult(privateKeyBytes);
+  final List<Map<String, dynamic>> _esimPackages = [
+    {
+      'id': 'kenya-1gb-7days',
+      'title': 'Kenya 1 GB High-Speed Data',
+      'validity': '7 Days',
+      'priceUsd': 2.50,
+    },
+    {
+      'id': 'global-3gb-30days',
+      'title': 'Global 3 GB Roaming Data',
+      'validity': '30 Days',
+      'priceUsd': 6.00,
+    },
+  ];
 
-      if (!mounted) return;
-      setState(() {
-        _clientPrivateKey = base64Encode(privateKeyBytes);
-        _clientPublicKey = base64Encode(publicKeyBytes);
-        _keysReady = true;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _statusMessage = "Key generation failed: $e";
-      });
-    }
-  }
+  Future<void> _redeemPackage(BuildContext context, Map<String, dynamic> package) async {
+    final double cost = package['priceUsd'];
 
-  // Curve25519 Scalar Multiplication (Basepoint G)
-  Uint8List _curve25519BasePointMult(Uint8List sk) {
-    final BigInt p = BigInt.parse("57896044618658097711785492504343953926634992332820282019728792003956564819949");
-    final BigInt d = _decodeLittleEndian(sk);
-
-    // Compute (x, z) coordinates over Montgomery curve y^2 = x^3 + 486662*x^2 + x
-    BigInt x1 = BigInt.from(9);
-    BigInt x2 = BigInt.one;
-    BigInt z2 = BigInt.zero;
-    BigInt x3 = x1;
-    BigInt z3 = BigInt.one;
-    bool swap = false;
-
-    for (int t = 254; t >= 0; t--) {
-      bool kT = ((d >> t) & BigInt.one) == BigInt.one;
-      swap ^= kT;
-      if (swap) {
-        var dummy = x2; x2 = x3; x3 = dummy;
-        dummy = z2; z2 = z3; z3 = dummy;
-      }
-      swap = kT;
-
-      BigInt a = (x2 + z2) % p;
-      BigInt aa = (a * a) % p;
-      BigInt b = (x2 - z2) % p;
-      BigInt bb = (b * b) % p;
-      BigInt e = (aa - bb) % p;
-      BigInt c = (x3 + z3) % p;
-      BigInt dVal = (x3 - z3) % p;
-      BigInt da = (dVal * a) % p;
-      BigInt cb = (c * b) % p;
-
-      x3 = ((da + cb) % p * (da + cb) % p) % p;
-      z3 = (x1 * ((da - cb) % p * (da - cb) % p) % p) % p;
-      x2 = (aa * bb) % p;
-      BigInt a24 = BigInt.from(121665);
-      z2 = (e * ((bb + (a24 * e) % p) % p)) % p;
-    }
-
-    if (swap) {
-      var dummy = x2; x2 = x3; x3 = dummy;
-      dummy = z2; z2 = z3; z3 = dummy;
-    }
-
-    BigInt pkVal = (x2 * z2.modPow(p - BigInt.two, p)) % p;
-    return _encodeLittleEndian(pkVal, 32);
-  }
-
-  BigInt _decodeLittleEndian(Uint8List bytes) {
-    BigInt result = BigInt.zero;
-    for (int i = bytes.length - 1; i >= 0; i--) {
-      result = (result << 8) | BigInt.from(bytes[i]);
-    }
-    return result;
-  }
-
-  Uint8List _encodeLittleEndian(BigInt val, int length) {
-    final bytes = Uint8List(length);
-    BigInt temp = val;
-    for (int i = 0; i < length; i++) {
-      bytes[i] = (temp & BigInt.from(0xFF)).toInt();
-      temp >>= 8;
-    }
-    return bytes;
-  }
-
-  Future<void> _connectToHost() async {
-    if (!_keysReady) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Still generating keys, try again in a second")),
+    if (userBalanceUsd < cost) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          title: const Text('Insufficient Data Credits', style: TextStyle(color: Colors.white)),
+          content: Text(
+            'You need \$${cost.toStringAsFixed(2)} to claim this plan. Complete social tasks or watch ads to top up.',
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+              onPressed: () {
+                Navigator.pop(context);
+                onShowOfferwall();
+              },
+              child: const Text('Earn Credits', style: TextStyle(color: Colors.black)),
+            )
+          ],
+        ),
       );
       return;
     }
 
-    final code = _codeController.text.trim();
-    if (code.length != 6) {
+    // Call Backend API
+    try {
+      final response = await http.post(
+        Uri.parse('https://your-backend-api.com/api/esim/redeem'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'userId': userId,
+          'packageId': package['id'],
+          'packageCostUsd': cost,
+        }),
+      );
+
+      final result = json.decode(response.body);
+
+      if (response.statusCode == 200 && result['success'] == true) {
+        onRefreshBalance();
+        _showQrModal(context, result['esimDetails']['lpaString']);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(result['message'] ?? 'Redemption failed')),
+        );
+      }
+    } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please enter a valid 6-digit code")),
+        const SnackBar(content: Text('Network error connecting to server.')),
       );
-      return;
-    }
-
-    setState(() {
-      _isConnecting = true;
-      _statusMessage = "Looking up host...";
-    });
-
-    try {
-      final pairResponse = await http.post(
-        Uri.parse("$_backendUrl/pair"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"code": code, "clientPublicKey": _clientPublicKey}),
-      ).timeout(const Duration(seconds: 15));
-
-      if (!mounted) return;
-
-      if (pairResponse.statusCode != 200) {
-        setState(() {
-          _isConnecting = false;
-          _statusMessage = "Invalid or expired code.";
-        });
-        return;
-      }
-
-      final data = jsonDecode(pairResponse.body);
-      final String hostPublicKey = data['hostPublicKey'];
-      final String hostEndpoint = data['hostEndpoint'];
-
-      await _startWireGuardTunnel(hostPublicKey, hostEndpoint);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isConnecting = false;
-        _statusMessage = "Connection failed. Check your internet and try again.";
-      });
     }
   }
 
-  Future<void> _startWireGuardTunnel(String hostPublicKey, String hostEndpoint) async {
-    setState(() => _statusMessage = "Connecting to Home Node...");
-
-    final wgConfig = '''
-[Interface]
-PrivateKey = $_clientPrivateKey
-Address = 10.200.0.2/32
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey = $hostPublicKey
-Endpoint = $hostEndpoint
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
-''';
-
-    try {
-      if (!_wgInitialized) {
-        await wireguard.initialize(interfaceName: 'wg0', vpnName: 'HomeTunnel');
-        _wgInitialized = true;
-
-        _vpnStageSubscription = wireguard.vpnStageSnapshot.listen((stage) {
-          if (!mounted) return;
-          setState(() {
-            _statusMessage = "VPN stage: ${stage.name}";
-            if (stage == VpnStage.connected) {
-              _isConnecting = false;
-              _isConnected = true;
-              _statusMessage = "Tunnel Active via Home Node!";
-            } else if (stage == VpnStage.disconnected) {
-              _isConnecting = false;
-              _isConnected = false;
-              _statusMessage = "Disconnected";
-            }
-          });
-        });
-      }
-
-      await wireguard.startVpn(
-        serverAddress: hostEndpoint,
-        wgQuickConfig: wgConfig,
-        providerBundleIdentifier: 'co.ke.hometunnel.wgextension',
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isConnecting = false;
-        _statusMessage = "VPN initialization failed: $e";
-      });
-    }
-  }
-
-  Future<void> _disconnect() async {
-    try {
-      await wireguard.stopVpn();
-    } catch (_) {}
-
-    if (!mounted) return;
-    setState(() {
-      _isConnected = false;
-      _isConnecting = false;
-      _statusMessage = "Disconnected";
-      _codeController.clear();
-    });
+  void _showQrModal(BuildContext context, String lpaString) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'DataStream eSIM Ready!',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(
+                data: lpaString,
+                version: QrVersions.auto,
+                size: 200.0,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Scan this QR code in your device settings to activate your profile.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.teal,
+                minimumSize: const Size.fromHeight(45),
+              ),
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Done', style: TextStyle(color: Colors.white)),
+            )
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('HomeTunnel Client'),
-        centerTitle: true,
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        title: const Row(
           children: [
-            Icon(
-              _isConnected ? Icons.vpn_lock : Icons.phonelink_ring,
-              size: 80,
-              color: _isConnected ? Colors.greenAccent : Colors.blueAccent,
-            ),
-            const SizedBox(height: 24),
-            Text(
-              _statusMessage,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
+            Icon(Icons.stream, color: Colors.tealAccent),
+            SizedBox(width: 8),
+            Text('DataStream', style: TextStyle(fontWeight: FontWeight.bold)),
+          ],
+        ),
+        backgroundColor: const Color(0xFF1E293B),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: onRefreshBalance)
+        ],
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator(color: Colors.tealAccent))
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Wallet Card
+                  Card(
+                    color: const Color(0xFF0F766E),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        children: [
+                          const Text('Data Credits Balance', style: TextStyle(color: Colors.white70, fontSize: 16)),
+                          const SizedBox(height: 8),
+                          Text('\$${userBalanceUsd.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.tealAccent,
+                              foregroundColor: Colors.black,
+                              minimumSize: const Size.fromHeight(45),
+                            ),
+                            icon: const Icon(Icons.bolt),
+                            label: const Text('Stream Free Data (Tapjoy)', style: TextStyle(fontWeight: FontWeight.bold)),
+                            onPressed: onShowOfferwall,
+                          )
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+                  const Text('Available Data Packs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                  const SizedBox(height: 12),
+
+                  ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _esimPackages.length,
+                    itemBuilder: (context, index) {
+                      final package = _esimPackages[index];
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: ListTile(
+                          leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
+                          title: Text(package['title'], style: const TextStyle(color: Colors.white)),
+                          subtitle: Text('Validity: ${package['validity']}', style: const TextStyle(color: Colors.white60)),
+                          trailing: ElevatedButton(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                            onPressed: () => _redeemPackage(context, package),
+                            child: Text('\$${package['priceUsd'].toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 32),
-            if (!_isConnected) ...[
-              TextField(
-                controller: _codeController,
+    );
+  }
+}
+
+// =============================================================================
+// TAB 2: EARN TASKS (SOCIAL MEDIA JOBS)
+// =============================================================================
+class EarnTasksTab extends StatelessWidget {
+  final List<Map<String, dynamic>> tasks;
+  final String userId;
+
+  const EarnTasksTab({Super.key, required this.tasks, required this.userId});
+
+  void _showSubmissionModal(BuildContext context, Map<String, dynamic> task) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Task: ${task['action']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 8),
+            Text('Platform: ${task['platform']}', style: const TextStyle(color: Colors.tealAccent)),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple),
+              icon: const Icon(Icons.open_in_new, color: Colors.white),
+              label: const Text('1. Open Link & Perform Action', style: TextStyle(color: Colors.white)),
+              onPressed: () {
+                // Open URL in browser or app
+              },
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent),
+              icon: const Icon(Icons.upload_file),
+              label: const Text('2. Upload Screenshot Proof'),
+              onPressed: () {
+                // Upload screenshot to Firebase Storage
+              },
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+              onPressed: () {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Proof submitted! Pending promoter approval.')),
+                );
+              },
+              child: const Text('Submit for Review', style: TextStyle(color: Colors.white)),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Earn Social Data'),
+        backgroundColor: const Color(0xFF1E293B),
+      ),
+      body: ListView.builder(
+        padding: const EdgeInsets.all(16.0),
+        itemCount: tasks.length,
+        itemBuilder: (context, index) {
+          final task = tasks[index];
+          return Card(
+            margin: const EdgeInsets.only(bottom: 12),
+            child: ListTile(
+              leading: Icon(
+                task['platform'] == 'Instagram' ? Icons.camera_alt : Icons.video_library,
+                color: Colors.tealAccent,
+              ),
+              title: Text('${task['action']} (${task['platform']})', style: const TextStyle(color: Colors.white)),
+              subtitle: Text('Earn: \$${task['payoutUsd'].toStringAsFixed(2)} in Data', style: const TextStyle(color: Colors.tealAccent)),
+              trailing: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                onPressed: () => _showSubmissionModal(context, task),
+                child: const Text('Start Task', style: TextStyle(color: Colors.white)),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// TAB 3: PROMOTE / CREATE CAMPAIGN (30% / 70% SPLIT)
+// =============================================================================
+class PromoteTab extends StatefulWidget {
+  final String userId;
+  final VoidCallback onCampaignCreated;
+
+  const PromoteTab({Super.key, required this.userId, required this.onCampaignCreated});
+
+  @override
+  State<PromoteTab> createState() => _PromoteTabState();
+}
+
+class _PromoteTabState extends State<PromoteTab> {
+  final _formKey = GlobalKey<FormState>();
+  String _selectedPlatform = 'Instagram';
+  String _targetUrl = '';
+  int _taskCap = 50; // Total users needed
+  double _costPerUserUsd = 0.10; // Promoter pays 10 cents per user
+
+  @override
+  Widget build(BuildContext context) {
+    final double totalCost = _taskCap * _costPerUserUsd;
+    final double appCommission = totalCost * 0.30; // 30% Platform Fee
+    final double earnerPool = totalCost * 0.70;    // 70% Distributed to Workers
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Create Campaign'),
+        backgroundColor: const Color(0xFF1E293B),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              DropdownButtonFormField<String>(
+                value: _selectedPlatform,
+                dropdownColor: const Color(0xFF1E293B),
+                decoration: const InputDecoration(labelText: 'Select Platform', labelStyle: TextStyle(color: Colors.white70)),
+                items: ['Instagram', 'TikTok', 'YouTube'].map((p) => DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(color: Colors.white)))).toList(),
+                onChanged: (val) => setState(() => _selectedPlatform = val!),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                decoration: const InputDecoration(labelText: 'Target Post/Profile Link', labelStyle: TextStyle(color: Colors.white70)),
+                style: const TextStyle(color: Colors.white),
+                onChanged: (val) => _targetUrl = val,
+                validator: (val) => val == null || val.isEmpty ? 'Please enter a valid URL' : null,
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                decoration: const InputDecoration(labelText: 'Task Cap (Number of Users Required)', labelStyle: TextStyle(color: Colors.white70)),
                 keyboardType: TextInputType.number,
-                maxLength: 6,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 28, letterSpacing: 8, fontWeight: FontWeight.bold),
-                decoration: InputDecoration(
-                  hintText: '000000',
-                  counterText: "",
-                  filled: true,
-                  fillColor: const Color(0xFF1E1E1E),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
+                style: const TextStyle(color: Colors.white),
+                initialValue: '50',
+                onChanged: (val) => setState(() => _taskCap = int.tryParse(val) ?? 0),
+              ),
+              const SizedBox(height: 24),
+
+              // CAMPAIGN SUMMARY CARD
+              Card(
+                color: const Color(0xFF1E293B),
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                        const Text('Total Campaign Budget:', style: TextStyle(color: Colors.white70)),
+                        Text('\$${totalCost.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      ]),
+                      const Divider(color: Colors.white24),
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                        const Text('Earner Reward Pool (70%):', style: TextStyle(color: Colors.white70)),
+                        Text('\$${earnerPool.toStringAsFixed(2)}', style: const TextStyle(color: Colors.tealAccent)),
+                      ]),
+                      const SizedBox(height: 4),
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                        const Text('Platform Fee (30%):', style: TextStyle(color: Colors.white70)),
+                        Text('\$${appCommission.toStringAsFixed(2)}', style: const TextStyle(color: Colors.grey)),
+                      ]),
+                    ],
                   ),
                 ),
               ),
+
               const SizedBox(height: 24),
               ElevatedButton(
-                onPressed: _isConnecting ? null : _connectToHost,
                 style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  backgroundColor: Colors.blueAccent,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  backgroundColor: Colors.teal,
+                  minimumSize: const Size.fromHeight(50),
                 ),
-                child: _isConnecting
-                    ? const SizedBox(
-                        height: 24,
-                        width: 24,
-                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-                      )
-                    : const Text('Connect Tunnel', style: TextStyle(fontSize: 18, color: Colors.white)),
-              ),
-            ] else ...[
-              ElevatedButton(
-                onPressed: _disconnect,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  backgroundColor: Colors.redAccent,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: const Text('Disconnect Tunnel', style: TextStyle(fontSize: 18, color: Colors.white)),
-              ),
+                onPressed: () {
+                  if (_formKey.currentState!.validate()) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Campaign Published! Funds reserved.')),
+                    );
+                    widget.onCampaignCreated();
+                  }
+                },
+                child: const Text('Launch Campaign', style: TextStyle(color: Colors.white, fontSize: 16)),
+              )
             ],
-          ],
+          ),
         ),
       ),
     );
