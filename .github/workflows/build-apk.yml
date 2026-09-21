@@ -1,4 +1,4 @@
-name: Build HomeTunnel Client APK
+name: Build DataStream Client APK
 
 on:
   push:
@@ -35,5 +35,5 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hometunnel-client-release
+          name: datastream-client-release
           path: build/app/outputs/flutter-apk/app-release.apk
