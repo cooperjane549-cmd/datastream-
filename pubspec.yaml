@@ -1,6 +1,7 @@
-name: hometunnel_client
-description: "HomeTunnel Client Application"
+name: datastream
+description: "DataStream - Earn free global eSIM data and promote social accounts."
 publish_to: 'none'
+
 version: 1.0.0+1
 
 environment:
@@ -9,9 +10,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
+  # UI & Networking
+  cupertino_icons: ^1.0.8
   http: ^1.2.0
-  cryptography: ^2.7.0
-  wireguard_flutter_plus: ^1.0.3
+  qr_flutter: ^4.1.0
+
+  # Ad & Offerwall Engine
+  flutter_tapjoy: ^2.0.0
 
 dev_dependencies:
   flutter_test:
@@ -20,4 +26,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  
