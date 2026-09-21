@@ -1,11 +1,18 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_tapjoy/flutter_tapjoy.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:http/http.dart' as http;
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   runApp(const DataStreamApp());
 }
 
@@ -20,19 +27,223 @@ class DataStreamApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         primarySwatch: Colors.teal,
-        scaffoldBackgroundColor: const Color(0xFF0F172A), // Dark slate background
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
         cardColor: const Color(0xFF1E293B),
         useMaterial3: true,
       ),
-      home: const MainNavigationScreen(userId: "user_12345"),
+      home: const AuthGate(),
     );
   }
 }
 
-class MainNavigationScreen extends StatefulWidget {
-  final String userId;
+// Handles switching between Login Screen and Main App Screen
+class AuthGate extends StatelessWidget {
+  const AuthGate({Super.key});
 
-  const MainNavigationScreen({Super.key, required this.userId});
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator(color: Colors.tealAccent)),
+          );
+        }
+
+        if (snapshot.hasData && snapshot.data != null) {
+          return MainNavigationScreen(user: snapshot.data!);
+        }
+
+        return const LoginScreen();
+      },
+    );
+  }
+}
+
+// =============================================================================
+// LOGIN SCREEN (GOOGLE AUTH + DEVICE LOCKING)
+// =============================================================================
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({Super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  bool _isLoggingIn = false;
+
+  Future<String?> _getDeviceId() async {
+    final deviceInfo = DeviceInfoPlugin();
+    if (Platform.isAndroid) {
+      final androidInfo = await deviceInfo.androidInfo;
+      return androidInfo.id; // Unique Hardware ID
+    } else if (Platform.isIOS) {
+      final iosInfo = await deviceInfo.iosInfo;
+      return iosInfo.identifierForVendor; // Unique iOS ID
+    }
+    return null;
+  }
+
+  Future<void> _signInWithGoogle() async {
+    setState(() => _isLoggingIn = true);
+
+    try {
+      final String? deviceId = await _getDeviceId();
+
+      if (deviceId == null) {
+        throw Exception("Unable to verify unique device hardware ID.");
+      }
+
+      // 1. Trigger Google Sign-In Flow
+      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
+      if (googleUser == null) {
+        setState(() => _isLoggingIn = false);
+        return; // User canceled login
+      }
+
+      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+      final AuthCredential credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+
+      // 2. Sign in to Firebase Auth
+      final UserCredential userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+      final User? user = userCredential.user;
+
+      if (user == null) {
+        throw Exception("Authentication failed.");
+      }
+
+      // 3. Check Device Registration in Firestore (One Device = One Account Rule)
+      final deviceRef = FirebaseFirestore.instance.collection('devices').doc(deviceId);
+      final deviceSnapshot = await deviceRef.get();
+
+      if (deviceSnapshot.exists) {
+        final registeredUid = deviceSnapshot.data()?['registeredUid'];
+
+        if (registeredUid != user.uid) {
+          // Device is already bound to another Google Account
+          await FirebaseAuth.instance.signOut();
+          await GoogleSignIn().signOut();
+
+          if (mounted) {
+            _showDeviceBoundDialog();
+          }
+          setState(() => _isLoggingIn = false);
+          return;
+        }
+      } else {
+        // Register this device to current user account
+        await deviceRef.set({
+          'deviceId': deviceId,
+          'registeredUid': user.uid,
+          'email': user.email,
+          'boundAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      // 4. Ensure User document exists in Firestore
+      final userRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
+      final userSnapshot = await userRef.get();
+
+      if (!userSnapshot.exists) {
+        await userRef.set({
+          'userId': user.uid,
+          'email': user.email,
+          'displayName': user.displayName,
+          'boundDeviceId': deviceId,
+          'balanceUsd': 0.00,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Login failed: ${e.toString()}')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoggingIn = false);
+      }
+    }
+  }
+
+  void _showDeviceBoundDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text('Device Restricted', style: TextStyle(color: Colors.redAccent)),
+        content: const Text(
+          'This device is already registered to a different DataStream account. '
+          'To prevent multi-account abuse, only one account is permitted per device.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK', style: TextStyle(color: Colors.tealAccent)),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.stream, size: 80, color: Colors.tealAccent),
+            const SizedBox(height: 16),
+            const Text(
+              'DataStream',
+              style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Earn global eSIM data by completing social tasks',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white60),
+            ),
+            const SizedBox(height: 48),
+            _isLoggingIn
+                ? const CircularProgressIndicator(color: Colors.tealAccent)
+                : ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      minimumSize: const Size.fromHeight(50),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: const Icon(Icons.g_mobiledata, size: 30, color: Colors.red),
+                    label: const Text(
+                      'Sign in with Google',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    onPressed: _signInWithGoogle,
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// MAIN NAVIGATION SCREEN
+// =============================================================================
+class MainNavigationScreen extends StatefulWidget {
+  final User user;
+
+  const MainNavigationScreen({Super.key, required this.user});
 
   @override
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -40,44 +251,19 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
-  double _userBalanceUsd = 0.00;
-  bool _isLoading = false;
   TJPlacement? _offerwallPlacement;
-
-  // Mock Active Tasks for "Earn Tasks" Tab
-  final List<Map<String, dynamic>> _activeTasks = [
-    {
-      'id': 'task_1',
-      'platform': 'Instagram',
-      'action': 'Follow Account',
-      'url': 'https://instagram.com/example',
-      'payoutUsd': 0.07, // 70% of 0.10 campaign cost
-    },
-    {
-      'id': 'task_2',
-      'platform': 'YouTube',
-      'action': 'Like & Comment',
-      'url': 'https://youtube.com/watch?v=example',
-      'payoutUsd': 0.14, // 70% of 0.20 campaign cost
-    },
-  ];
 
   @override
   void initState() {
     super.initState();
     _initTapjoy();
-    _fetchUserBalance();
   }
 
-  // Initialize Tapjoy SDK
   void _initTapjoy() {
     TapJoyPlugin.shared.setConnectionResultHandler((connected) {
       if (connected) {
-        debugPrint("Tapjoy Connected Successfully");
-        TapJoyPlugin.shared.setUserID(userID: widget.userId);
+        TapJoyPlugin.shared.setUserID(userID: widget.user.uid);
         _loadOfferwallPlacement();
-      } else {
-        debugPrint("Tapjoy Connection Failed");
       }
     });
 
@@ -90,11 +276,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   void _loadOfferwallPlacement() {
     _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
-    _offerwallPlacement?.setHandler((event, error) {
-      if (event == TJPlacementEvent.requestSuccess) {
-        debugPrint("Placement content ready");
-      }
-    });
     TapJoyPlugin.shared.addPlacement(placement: _offerwallPlacement!);
   }
 
@@ -108,69 +289,62 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     }
   }
 
-  Future<void> _fetchUserBalance() async {
-    setState(() => _isLoading = true);
-    try {
-      final response = await http.get(
-        Uri.parse('https://your-backend-api.com/api/user/${widget.userId}/balance'),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        setState(() {
-          _userBalanceUsd = (data['balanceUsd'] as num).toDouble();
-        });
-      }
-    } catch (e) {
-      debugPrint("Error fetching balance: $e");
-    } finally {
-      setState(() => _isLoading = false);
-    }
+  Future<void> _signOut() async {
+    await FirebaseAuth.instance.signOut();
+    await GoogleSignIn().signOut();
   }
 
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      EsimStoreTab(
-        userBalanceUsd: _userBalanceUsd,
-        isLoading: _isLoading,
-        onRefreshBalance: _fetchUserBalance,
-        onShowOfferwall: _showOfferwall,
-        userId: widget.userId,
-      ),
-      EarnTasksTab(
-        tasks: _activeTasks,
-        userId: widget.userId,
-      ),
-      PromoteTab(
-        userId: widget.userId,
-        onCampaignCreated: _fetchUserBalance,
-      ),
-    ];
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance.collection('users').doc(widget.user.uid).snapshots(),
+      builder: (context, snapshot) {
+        double userBalanceUsd = 0.00;
+        if (snapshot.hasData && snapshot.data!.exists) {
+          final data = snapshot.data!.data() as Map<String, dynamic>?;
+          userBalanceUsd = (data?['balanceUsd'] as num?)?.toDouble() ?? 0.00;
+        }
 
-    return Scaffold(
-      body: screens[_currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (index) => setState(() => _currentIndex = index),
-        backgroundColor: const Color(0xFF1E293B),
-        selectedItemColor: Colors.tealAccent,
-        unselectedItemColor: Colors.white54,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.cell_tower),
-            label: 'eSIM & Wallet',
+        final screens = [
+          EsimStoreTab(
+            userBalanceUsd: userBalanceUsd,
+            onShowOfferwall: _showOfferwall,
+            user: widget.user,
+            onSignOut: _signOut,
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.task_alt),
-            label: 'Earn Data',
+          EarnTasksTab(
+            userId: widget.user.uid,
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.campaign),
-            label: 'Promote',
+          PromoteTab(
+            userId: widget.user.uid,
           ),
-        ],
-      ),
+        ];
+
+        return Scaffold(
+          body: screens[_currentIndex],
+          bottomNavigationBar: BottomNavigationBar(
+            currentIndex: _currentIndex,
+            onTap: (index) => setState(() => _currentIndex = index),
+            backgroundColor: const Color(0xFF1E293B),
+            selectedItemColor: Colors.tealAccent,
+            unselectedItemColor: Colors.white54,
+            items: const [
+              BottomNavigationBarItem(
+                icon: Icon(Icons.cell_tower),
+                label: 'eSIM & Wallet',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.task_alt),
+                label: 'Earn Data',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.campaign),
+                label: 'Promote',
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -180,18 +354,16 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 // =============================================================================
 class EsimStoreTab extends StatelessWidget {
   final double userBalanceUsd;
-  final bool isLoading;
-  final VoidCallback onRefreshBalance;
   final VoidCallback onShowOfferwall;
-  final String userId;
+  final User user;
+  final VoidCallback onSignOut;
 
   EsimStoreTab({
     Super.key,
     required this.userBalanceUsd,
-    required this.isLoading,
-    required this.onRefreshBalance,
     required this.onShowOfferwall,
-    required this.userId,
+    required this.user,
+    required this.onSignOut,
   });
 
   final List<Map<String, dynamic>> _esimPackages = [
@@ -241,13 +413,12 @@ class EsimStoreTab extends StatelessWidget {
       return;
     }
 
-    // Call Backend API
     try {
       final response = await http.post(
         Uri.parse('https://your-backend-api.com/api/esim/redeem'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
-          'userId': userId,
+          'userId': user.uid,
           'packageId': package['id'],
           'packageCostUsd': cost,
         }),
@@ -256,7 +427,6 @@ class EsimStoreTab extends StatelessWidget {
       final result = json.decode(response.body);
 
       if (response.statusCode == 200 && result['success'] == true) {
-        onRefreshBalance();
         _showQrModal(context, result['esimDetails']['lpaString']);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -331,83 +501,82 @@ class EsimStoreTab extends StatelessWidget {
         ),
         backgroundColor: const Color(0xFF1E293B),
         actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: onRefreshBalance)
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            onPressed: onSignOut,
+          )
         ],
       ),
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator(color: Colors.tealAccent))
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Wallet Card
-                  Card(
-                    color: const Color(0xFF0F766E),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(20.0),
-                      child: Column(
-                        children: [
-                          const Text('Data Credits Balance', style: TextStyle(color: Colors.white70, fontSize: 16)),
-                          const SizedBox(height: 8),
-                          Text('\$${userBalanceUsd.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 16),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.tealAccent,
-                              foregroundColor: Colors.black,
-                              minimumSize: const Size.fromHeight(45),
-                            ),
-                            icon: const Icon(Icons.bolt),
-                            label: const Text('Stream Free Data (Tapjoy)', style: TextStyle(fontWeight: FontWeight.bold)),
-                            onPressed: onShowOfferwall,
-                          )
-                        ],
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              color: const Color(0xFF0F766E),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  children: [
+                    Text(user.email ?? '', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    const Text('Data Credits Balance', style: TextStyle(color: Colors.white, fontSize: 16)),
+                    const SizedBox(height: 8),
+                    Text('\$${userBalanceUsd.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.tealAccent,
+                        foregroundColor: Colors.black,
+                        minimumSize: const Size.fromHeight(45),
                       ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-                  const Text('Available Data Packs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                  const SizedBox(height: 12),
-
-                  ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: _esimPackages.length,
-                    itemBuilder: (context, index) {
-                      final package = _esimPackages[index];
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        child: ListTile(
-                          leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
-                          title: Text(package['title'], style: const TextStyle(color: Colors.white)),
-                          subtitle: Text('Validity: ${package['validity']}', style: const TextStyle(color: Colors.white60)),
-                          trailing: ElevatedButton(
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-                            onPressed: () => _redeemPackage(context, package),
-                            child: Text('\$${package['priceUsd'].toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
+                      icon: const Icon(Icons.bolt),
+                      label: const Text('Stream Free Data (Tapjoy)', style: TextStyle(fontWeight: FontWeight.bold)),
+                      onPressed: onShowOfferwall,
+                    )
+                  ],
+                ),
               ),
             ),
+            const SizedBox(height: 24),
+            const Text('Available Data Packs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 12),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _esimPackages.length,
+              itemBuilder: (context, index) {
+                final package = _esimPackages[index];
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: ListTile(
+                    leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
+                    title: Text(package['title'], style: const TextStyle(color: Colors.white)),
+                    subtitle: Text('Validity: ${package['validity']}', style: const TextStyle(color: Colors.white60)),
+                    trailing: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                      onPressed: () => _redeemPackage(context, package),
+                      child: Text('\$${package['priceUsd'].toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
 // =============================================================================
-// TAB 2: EARN TASKS (SOCIAL MEDIA JOBS)
+// TAB 2: EARN TASKS
 // =============================================================================
 class EarnTasksTab extends StatelessWidget {
-  final List<Map<String, dynamic>> tasks;
   final String userId;
 
-  const EarnTasksTab({Super.key, required this.tasks, required this.userId});
+  const EarnTasksTab({Super.key, required this.userId});
 
   void _showSubmissionModal(BuildContext context, Map<String, dynamic> task) {
     showModalBottomSheet(
@@ -423,35 +592,40 @@ class EarnTasksTab extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Task: ${task['action']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+            Text('Task: ${task['platform']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
             const SizedBox(height: 8),
-            Text('Platform: ${task['platform']}', style: const TextStyle(color: Colors.tealAccent)),
+            Text('Target Link: ${task['targetUrl']}', style: const TextStyle(color: Colors.tealAccent)),
             const SizedBox(height: 16),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple),
               icon: const Icon(Icons.open_in_new, color: Colors.white),
               label: const Text('1. Open Link & Perform Action', style: TextStyle(color: Colors.white)),
-              onPressed: () {
-                // Open URL in browser or app
-              },
+              onPressed: () {},
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent),
               icon: const Icon(Icons.upload_file),
               label: const Text('2. Upload Screenshot Proof'),
-              onPressed: () {
-                // Upload screenshot to Firebase Storage
-              },
+              onPressed: () {},
             ),
             const SizedBox(height: 20),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-              onPressed: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Proof submitted! Pending promoter approval.')),
-                );
+              onPressed: () async {
+                await FirebaseFirestore.instance.collection('task_submissions').add({
+                  'taskId': task['id'],
+                  'userId': userId,
+                  'status': 'pending',
+                  'submittedAt': FieldValue.serverTimestamp(),
+                });
+
+                if (context.mounted) {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Proof submitted! Pending promoter approval.')),
+                  );
+                }
               },
               child: const Text('Submit for Review', style: TextStyle(color: Colors.white)),
             )
@@ -468,26 +642,51 @@ class EarnTasksTab extends StatelessWidget {
         title: const Text('Earn Social Data'),
         backgroundColor: const Color(0xFF1E293B),
       ),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(16.0),
-        itemCount: tasks.length,
-        itemBuilder: (context, index) {
-          final task = tasks[index];
-          return Card(
-            margin: const EdgeInsets.only(bottom: 12),
-            child: ListTile(
-              leading: Icon(
-                task['platform'] == 'Instagram' ? Icons.camera_alt : Icons.video_library,
-                color: Colors.tealAccent,
-              ),
-              title: Text('${task['action']} (${task['platform']})', style: const TextStyle(color: Colors.white)),
-              subtitle: Text('Earn: \$${task['payoutUsd'].toStringAsFixed(2)} in Data', style: const TextStyle(color: Colors.tealAccent)),
-              trailing: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-                onPressed: () => _showSubmissionModal(context, task),
-                child: const Text('Start Task', style: TextStyle(color: Colors.white)),
-              ),
-            ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('campaigns')
+            .where('status', isEqualTo: 'active')
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator(color: Colors.tealAccent));
+          }
+
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(
+              child: Text('No active campaigns available.', style: TextStyle(color: Colors.white54)),
+            );
+          }
+
+          final campaigns = snapshot.data!.docs;
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(16.0),
+            itemCount: campaigns.length,
+            itemBuilder: (context, index) {
+              final data = campaigns[index].data() as Map<String, dynamic>;
+              data['id'] = campaigns[index].id;
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                child: ListTile(
+                  leading: Icon(
+                    data['platform'] == 'Instagram' ? Icons.camera_alt : Icons.video_library,
+                    color: Colors.tealAccent,
+                  ),
+                  title: Text('${data['platform']} Task', style: const TextStyle(color: Colors.white)),
+                  subtitle: Text(
+                    'Earn: \$${((data['costPerUserUsd'] ?? 0.10) * 0.70).toStringAsFixed(2)} in Data',
+                    style: const TextStyle(color: Colors.tealAccent),
+                  ),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                    onPressed: () => _showSubmissionModal(context, data),
+                    child: const Text('Start Task', style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              );
+            },
           );
         },
       ),
@@ -496,13 +695,12 @@ class EarnTasksTab extends StatelessWidget {
 }
 
 // =============================================================================
-// TAB 3: PROMOTE / CREATE CAMPAIGN (30% / 70% SPLIT)
+// TAB 3: PROMOTE / CREATE CAMPAIGN
 // =============================================================================
 class PromoteTab extends StatefulWidget {
   final String userId;
-  final VoidCallback onCampaignCreated;
 
-  const PromoteTab({Super.key, required this.userId, required this.onCampaignCreated});
+  const PromoteTab({Super.key, required this.userId});
 
   @override
   State<PromoteTab> createState() => _PromoteTabState();
@@ -512,14 +710,39 @@ class _PromoteTabState extends State<PromoteTab> {
   final _formKey = GlobalKey<FormState>();
   String _selectedPlatform = 'Instagram';
   String _targetUrl = '';
-  int _taskCap = 50; // Total users needed
-  double _costPerUserUsd = 0.10; // Promoter pays 10 cents per user
+  int _taskCap = 50;
+  final double _costPerUserUsd = 0.10;
+
+  Future<void> _createCampaign() async {
+    final double totalCost = _taskCap * _costPerUserUsd;
+    final double appCommission = totalCost * 0.30;
+    final double earnerPool = totalCost * 0.70;
+
+    await FirebaseFirestore.instance.collection('campaigns').add({
+      'promoterId': widget.userId,
+      'platform': _selectedPlatform,
+      'targetUrl': _targetUrl,
+      'taskCap': _taskCap,
+      'costPerUserUsd': _costPerUserUsd,
+      'totalCost': totalCost,
+      'appCommission': appCommission,
+      'earnerPool': earnerPool,
+      'status': 'active',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Campaign Published!')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final double totalCost = _taskCap * _costPerUserUsd;
-    final double appCommission = totalCost * 0.30; // 30% Platform Fee
-    final double earnerPool = totalCost * 0.70;    // 70% Distributed to Workers
+    final double appCommission = totalCost * 0.30;
+    final double earnerPool = totalCost * 0.70;
 
     return Scaffold(
       appBar: AppBar(
@@ -556,8 +779,6 @@ class _PromoteTabState extends State<PromoteTab> {
                 onChanged: (val) => setState(() => _taskCap = int.tryParse(val) ?? 0),
               ),
               const SizedBox(height: 24),
-
-              // CAMPAIGN SUMMARY CARD
               Card(
                 color: const Color(0xFF1E293B),
                 child: Padding(
@@ -582,7 +803,6 @@ class _PromoteTabState extends State<PromoteTab> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 24),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
@@ -591,10 +811,7 @@ class _PromoteTabState extends State<PromoteTab> {
                 ),
                 onPressed: () {
                   if (_formKey.currentState!.validate()) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Campaign Published! Funds reserved.')),
-                    );
-                    widget.onCampaignCreated();
+                    _createCampaign();
                   }
                 },
                 child: const Text('Launch Campaign', style: TextStyle(color: Colors.white, fontSize: 16)),
