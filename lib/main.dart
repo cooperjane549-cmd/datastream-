@@ -6,7 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:flutter_tapjoy/flutter_tapjoy.dart';
+import 'package:tapjoy_offerwall/tapjoy_offerwall.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:http/http.dart' as http;
 
@@ -255,32 +255,38 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _initTapjoy() {
-    TapJoyPlugin.shared.setConnectionResultHandler((result) {
-      if (result == TJConnectionResult.connected) {
-        TapJoyPlugin.shared.setUserID(userID: widget.user.uid);
+    Tapjoy.connect(
+      sdkKey: Platform.isAndroid ? "YOUR_ANDROID_TAPJOY_SDK_KEY" : "YOUR_IOS_TAPJOY_SDK_KEY",
+      options: {"debug": true},
+      onConnectSuccess: () async {
+        await Tapjoy.setUserID(userID: widget.user.uid);
         _loadOfferwallPlacement();
-      }
-    });
-
-    TapJoyPlugin.shared.connect(
-      androidApiKey: "YOUR_ANDROID_TAPJOY_SDK_KEY",
-      iOSApiKey: "YOUR_IOS_TAPJOY_SDK_KEY",
-      debug: true,
+      },
+      onConnectFailure: (code, message) {
+        debugPrint("Tapjoy Connection Failed: $message");
+      },
     );
   }
 
-  void _loadOfferwallPlacement() {
-    _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
-    TapJoyPlugin.shared.addPlacement(_offerwallPlacement!);
-    _offerwallPlacement!.requestContent();
+  void _loadOfferwallPlacement() async {
+    _offerwallPlacement = await TJPlacement.createPlacement(
+      name: "DataStream_Offerwall",
+    );
+    await _offerwallPlacement?.requestContent();
   }
 
-  void _showOfferwall() {
+  void _showOfferwall() async {
     if (_offerwallPlacement != null) {
-      _offerwallPlacement!.showPlacement();
-    } else {
+      final isReady = await _offerwallPlacement!.isContentReady();
+      if (isReady) {
+        await _offerwallPlacement!.showPlacement();
+        return;
+      }
+    }
+    
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Offerwall loading... Please try again.')),
+        const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
       );
     }
   }
