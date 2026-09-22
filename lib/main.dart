@@ -259,7 +259,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       sdkKey: Platform.isAndroid ? "YOUR_ANDROID_TAPJOY_SDK_KEY" : "YOUR_IOS_TAPJOY_SDK_KEY",
       options: {"debug": true},
       onConnectSuccess: () async {
-        await Tapjoy.setUserID(userID: widget.user.uid);
+        // Fix 1: Parameter name is `userId` (lowercase d)
+        await Tapjoy.setUserID(userId: widget.user.uid);
         _loadOfferwallPlacement();
       },
       onConnectFailure: (code, message) {
@@ -269,21 +270,21 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _loadOfferwallPlacement() async {
-    _offerwallPlacement = await TJPlacement.createPlacement(
-      name: "DataStream_Offerwall",
-    );
+    // Fix 2: Instantiate TJPlacement constructor directly
+    _offerwallPlacement = TJPlacement(placementName: "DataStream_Offerwall");
     await _offerwallPlacement?.requestContent();
   }
 
   void _showOfferwall() async {
     if (_offerwallPlacement != null) {
       final isReady = await _offerwallPlacement!.isContentReady();
-      if (isReady) {
-        await _offerwallPlacement!.showPlacement();
+      if (isReady == true) {
+        // Fix 3: Method name is `showContent()`
+        await _offerwallPlacement!.showContent();
         return;
       }
     }
-    
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
