@@ -246,7 +246,7 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
-  static const String _placementName = "DataStream_Offerwall";
+  TJPlacement? _offerwallPlacement;
 
   @override
   void initState() {
@@ -269,23 +269,26 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _loadOfferwallPlacement() async {
-    // Static methods for placement management in tapjoy_offerwall: 14.6.0
-    await TJPlacement.getPlacement(placementName: _placementName);
-    await TJPlacement.requestContent(placementName: _placementName);
+    // Correct instance creation using named argument `name`
+    _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
+    await _offerwallPlacement?.requestContent();
   }
 
   void _showOfferwall() async {
-    final isReady = await TJPlacement.isContentReady(placementName: _placementName);
-    if (isReady == true) {
-      await TJPlacement.showContent(placementName: _placementName);
-    } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
-        );
+    if (_offerwallPlacement != null) {
+      final isReady = await _offerwallPlacement!.isContentReady();
+      if (isReady == true) {
+        await _offerwallPlacement!.showContent();
+        return;
+      } else {
+        await _offerwallPlacement!.requestContent();
       }
-      // Re-trigger request content if not ready
-      await TJPlacement.requestContent(placementName: _placementName);
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
+      );
     }
   }
 
