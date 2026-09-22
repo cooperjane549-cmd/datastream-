@@ -246,7 +246,7 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
-  TJPlacement? _offerwallPlacement;
+  static const String _placementName = "DataStream_Offerwall";
 
   @override
   void initState() {
@@ -259,7 +259,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       sdkKey: Platform.isAndroid ? "YOUR_ANDROID_TAPJOY_SDK_KEY" : "YOUR_IOS_TAPJOY_SDK_KEY",
       options: {"debug": true},
       onConnectSuccess: () async {
-        // Fix 1: Parameter name is `userId` (lowercase d)
         await Tapjoy.setUserID(userId: widget.user.uid);
         _loadOfferwallPlacement();
       },
@@ -270,25 +269,23 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _loadOfferwallPlacement() async {
-    // Fix 2: Instantiate TJPlacement constructor directly
-    _offerwallPlacement = TJPlacement(placementName: "DataStream_Offerwall");
-    await _offerwallPlacement?.requestContent();
+    // Static methods for placement management in tapjoy_offerwall: 14.6.0
+    await TJPlacement.getPlacement(placementName: _placementName);
+    await TJPlacement.requestContent(placementName: _placementName);
   }
 
   void _showOfferwall() async {
-    if (_offerwallPlacement != null) {
-      final isReady = await _offerwallPlacement!.isContentReady();
-      if (isReady == true) {
-        // Fix 3: Method name is `showContent()`
-        await _offerwallPlacement!.showContent();
-        return;
+    final isReady = await TJPlacement.isContentReady(placementName: _placementName);
+    if (isReady == true) {
+      await TJPlacement.showContent(placementName: _placementName);
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
+        );
       }
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Offerwall loading... Please try again in a few seconds.')),
-      );
+      // Re-trigger request content if not ready
+      await TJPlacement.requestContent(placementName: _placementName);
     }
   }
 
