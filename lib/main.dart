@@ -17,7 +17,7 @@ void main() async {
 }
 
 class DataStreamApp extends StatelessWidget {
-  const DataStreamApp({Super.key});
+  const DataStreamApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -36,9 +36,8 @@ class DataStreamApp extends StatelessWidget {
   }
 }
 
-// Handles switching between Login Screen and Main App Screen
 class AuthGate extends StatelessWidget {
-  const AuthGate({Super.key});
+  const AuthGate({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -65,7 +64,7 @@ class AuthGate extends StatelessWidget {
 // LOGIN SCREEN (GOOGLE AUTH + DEVICE LOCKING)
 // =============================================================================
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({Super.key});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -78,10 +77,10 @@ class _LoginScreenState extends State<LoginScreen> {
     final deviceInfo = DeviceInfoPlugin();
     if (Platform.isAndroid) {
       final androidInfo = await deviceInfo.androidInfo;
-      return androidInfo.id; // Unique Hardware ID
+      return androidInfo.id;
     } else if (Platform.isIOS) {
       final iosInfo = await deviceInfo.iosInfo;
-      return iosInfo.identifierForVendor; // Unique iOS ID
+      return iosInfo.identifierForVendor;
     }
     return null;
   }
@@ -96,11 +95,10 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception("Unable to verify unique device hardware ID.");
       }
 
-      // 1. Trigger Google Sign-In Flow
       final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
       if (googleUser == null) {
         setState(() => _isLoggingIn = false);
-        return; // User canceled login
+        return;
       }
 
       final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
@@ -109,7 +107,6 @@ class _LoginScreenState extends State<LoginScreen> {
         idToken: googleAuth.idToken,
       );
 
-      // 2. Sign in to Firebase Auth
       final UserCredential userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
       final User? user = userCredential.user;
 
@@ -117,7 +114,6 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception("Authentication failed.");
       }
 
-      // 3. Check Device Registration in Firestore (One Device = One Account Rule)
       final deviceRef = FirebaseFirestore.instance.collection('devices').doc(deviceId);
       final deviceSnapshot = await deviceRef.get();
 
@@ -125,7 +121,6 @@ class _LoginScreenState extends State<LoginScreen> {
         final registeredUid = deviceSnapshot.data()?['registeredUid'];
 
         if (registeredUid != user.uid) {
-          // Device is already bound to another Google Account
           await FirebaseAuth.instance.signOut();
           await GoogleSignIn().signOut();
 
@@ -136,7 +131,6 @@ class _LoginScreenState extends State<LoginScreen> {
           return;
         }
       } else {
-        // Register this device to current user account
         await deviceRef.set({
           'deviceId': deviceId,
           'registeredUid': user.uid,
@@ -145,7 +139,6 @@ class _LoginScreenState extends State<LoginScreen> {
         });
       }
 
-      // 4. Ensure User document exists in Firestore
       final userRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
       final userSnapshot = await userRef.get();
 
@@ -197,40 +190,42 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.stream, size: 80, color: Colors.tealAccent),
-            const SizedBox(height: 16),
-            const Text(
-              'DataStream',
-              style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Earn global eSIM data by completing social tasks',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white60),
-            ),
-            const SizedBox(height: 48),
-            _isLoggingIn
-                ? const CircularProgressIndicator(color: Colors.tealAccent)
-                : ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
-                      minimumSize: const Size.fromHeight(50),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.stream, size: 80, color: Colors.tealAccent),
+              const SizedBox(height: 16),
+              const Text(
+                'DataStream',
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Earn global eSIM data by completing social tasks',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white60),
+              ),
+              const SizedBox(height: 48),
+              _isLoggingIn
+                  ? const CircularProgressIndicator(color: Colors.tealAccent)
+                  : ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        minimumSize: const Size.fromHeight(50),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      icon: const Icon(Icons.g_mobiledata, size: 30, color: Colors.red),
+                      label: const Text(
+                        'Sign in with Google',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      onPressed: _signInWithGoogle,
                     ),
-                    icon: const Icon(Icons.g_mobiledata, size: 30, color: Colors.red),
-                    label: const Text(
-                      'Sign in with Google',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    onPressed: _signInWithGoogle,
-                  ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -243,7 +238,7 @@ class _LoginScreenState extends State<LoginScreen> {
 class MainNavigationScreen extends StatefulWidget {
   final User user;
 
-  const MainNavigationScreen({Super.key, required this.user});
+  const MainNavigationScreen({super.key, required this.user});
 
   @override
   State<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -260,8 +255,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _initTapjoy() {
-    TapJoyPlugin.shared.setConnectionResultHandler((connected) {
-      if (connected) {
+    TapJoyPlugin.shared.setConnectionResultHandler((result) {
+      if (result == TJConnectionResult.connected) {
         TapJoyPlugin.shared.setUserID(userID: widget.user.uid);
         _loadOfferwallPlacement();
       }
@@ -276,12 +271,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   void _loadOfferwallPlacement() {
     _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
-    TapJoyPlugin.shared.addPlacement(placement: _offerwallPlacement!);
+    TapJoyPlugin.shared.addPlacement(_offerwallPlacement!);
+    _offerwallPlacement!.requestContent();
   }
 
   void _showOfferwall() {
     if (_offerwallPlacement != null) {
-      _offerwallPlacement!.showContent();
+      _offerwallPlacement!.showPlacement();
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Offerwall loading... Please try again.')),
@@ -359,7 +355,7 @@ class EsimStoreTab extends StatelessWidget {
   final VoidCallback onSignOut;
 
   EsimStoreTab({
-    Super.key,
+    super.key,
     required this.userBalanceUsd,
     required this.onShowOfferwall,
     required this.user,
@@ -427,16 +423,22 @@ class EsimStoreTab extends StatelessWidget {
       final result = json.decode(response.body);
 
       if (response.statusCode == 200 && result['success'] == true) {
-        _showQrModal(context, result['esimDetails']['lpaString']);
+        if (context.mounted) {
+          _showQrModal(context, result['esimDetails']['lpaString']);
+        }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result['message'] ?? 'Redemption failed')),
-        );
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(result['message'] ?? 'Redemption failed')),
+          );
+        }
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Network error connecting to server.')),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Network error connecting to server.')),
+        );
+      }
     }
   }
 
@@ -576,7 +578,7 @@ class EsimStoreTab extends StatelessWidget {
 class EarnTasksTab extends StatelessWidget {
   final String userId;
 
-  const EarnTasksTab({Super.key, required this.userId});
+  const EarnTasksTab({super.key, required this.userId});
 
   void _showSubmissionModal(BuildContext context, Map<String, dynamic> task) {
     showModalBottomSheet(
@@ -700,7 +702,7 @@ class EarnTasksTab extends StatelessWidget {
 class PromoteTab extends StatefulWidget {
   final String userId;
 
-  const PromoteTab({Super.key, required this.userId});
+  const PromoteTab({super.key, required this.userId});
 
   @override
   State<PromoteTab> createState() => _PromoteTabState();
