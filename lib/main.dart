@@ -268,9 +268,28 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
   }
 
+  // Fixed: tapjoy_offerwall's TJPlacement is created via the async
+  // getPlacement() factory (placementName, not name), not a plain constructor.
   void _loadOfferwallPlacement() async {
-    // Correct instance creation using named argument `name`
-    _offerwallPlacement = TJPlacement(name: "DataStream_Offerwall");
+    _offerwallPlacement = await TJPlacement.getPlacement(
+      placementName: "DataStream_Offerwall",
+      onRequestSuccess: (placement) {
+        debugPrint("Tapjoy: request reached servers");
+      },
+      onRequestFailure: (placement, error) {
+        debugPrint("Tapjoy: request failed - $error");
+      },
+      onContentReady: (placement) {
+        debugPrint("Tapjoy: content ready to show");
+      },
+      onContentShow: (placement) {
+        debugPrint("Tapjoy: content shown");
+      },
+      onContentDismiss: (placement) {
+        // Pre-load the next unit so it's ready next time the user taps in.
+        _loadOfferwallPlacement();
+      },
+    );
     await _offerwallPlacement?.requestContent();
   }
 
