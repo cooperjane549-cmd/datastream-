@@ -41,4 +41,5 @@ flutter {
 
 dependencies {
     implementation platform('com.google.firebase:firebase-bom:33.8.0')
+    implementation 'com.tapjoy:tapjoy-android-sdk:14.4.0'
 }
