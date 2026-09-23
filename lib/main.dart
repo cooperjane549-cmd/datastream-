@@ -3,11 +3,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package0cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:tapjoy_offerwall/tapjoy_offerwall.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 
 void main() async {
@@ -61,7 +63,7 @@ class AuthGate extends StatelessWidget {
 }
 
 // =============================================================================
-// LOGIN SCREEN (GOOGLE AUTH + DEVICE LOCKING)
+// LOGIN SCREEN (GOOGLE AUTH + HARDWARE DEVICE LOCKING)
 // =============================================================================
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -268,8 +270,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
   }
 
-  // Fixed: tapjoy_offerwall's TJPlacement is created via the async
-  // getPlacement() factory (placementName, not name), not a plain constructor.
   void _loadOfferwallPlacement() async {
     _offerwallPlacement = await TJPlacement.getPlacement(
       placementName: "DataStream_Offerwall",
@@ -286,7 +286,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         debugPrint("Tapjoy: content shown");
       },
       onContentDismiss: (placement) {
-        // Pre-load the next unit so it's ready next time the user taps in.
         _loadOfferwallPlacement();
       },
     );
@@ -339,6 +338,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           ),
           PromoteTab(
             userId: widget.user.uid,
+            userBalanceUsd: userBalanceUsd,
           ),
         ];
 
@@ -372,7 +372,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 }
 
 // =============================================================================
-// TAB 1: ESIM STORE & WALLET HUB
+// TAB 1: ESIM STORE & WALLET HUB (M-PESA TELEGRAM + PAYPAL + QR SCAN)
 // =============================================================================
 class EsimStoreTab extends StatelessWidget {
   final double userBalanceUsd;
@@ -380,28 +380,13 @@ class EsimStoreTab extends StatelessWidget {
   final User user;
   final VoidCallback onSignOut;
 
-  EsimStoreTab({
+  const EsimStoreTab({
     super.key,
     required this.userBalanceUsd,
     required this.onShowOfferwall,
     required this.user,
     required this.onSignOut,
   });
-
-  final List<Map<String, dynamic>> _esimPackages = [
-    {
-      'id': 'kenya-1gb-7days',
-      'title': 'Kenya 1 GB High-Speed Data',
-      'validity': '7 Days',
-      'priceUsd': 2.50,
-    },
-    {
-      'id': 'global-3gb-30days',
-      'title': 'Global 3 GB Roaming Data',
-      'validity': '30 Days',
-      'priceUsd': 6.00,
-    },
-  ];
 
   Future<void> _redeemPackage(BuildContext context, Map<String, dynamic> package) async {
     final double cost = package['priceUsd'];
@@ -413,7 +398,7 @@ class EsimStoreTab extends StatelessWidget {
           backgroundColor: const Color(0xFF1E293B),
           title: const Text('Insufficient Data Credits', style: TextStyle(color: Colors.white)),
           content: Text(
-            'You need \$${cost.toStringAsFixed(2)} to claim this plan. Complete social tasks or watch ads to top up.',
+            'You need \$${cost.toStringAsFixed(2)} to claim this plan. Complete social tasks or top up your balance.',
             style: const TextStyle(color: Colors.white70),
           ),
           actions: [
@@ -437,7 +422,7 @@ class EsimStoreTab extends StatelessWidget {
 
     try {
       final response = await http.post(
-        Uri.parse('https://your-backend-api.com/api/esim/redeem'),
+        Uri.parse('https://your-render-service.onrender.com/api/esim/redeem'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'userId': user.uid,
@@ -462,7 +447,133 @@ class EsimStoreTab extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Network error connecting to server.')),
+          const SnackBar(content: Text('Network error connecting to eSIM server.')),
+        );
+      }
+    }
+  }
+
+  void _showTopUpOptions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Select Payment Method',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: const Icon(Icons.phone_android, color: Colors.greenAccent),
+              title: const Text('M-Pesa (Manual Verification)', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Send money & verify via Telegram Bot', style: TextStyle(color: Colors.white60)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.white54),
+              onTap: () {
+                Navigator.pop(context);
+                _showMpesaSubmitDialog(context);
+              },
+            ),
+            const Divider(color: Colors.white24),
+            ListTile(
+              leading: const Icon(Icons.payment, color: Colors.blueAccent),
+              title: const Text('PayPal', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Instant automatic checkout', style: TextStyle(color: Colors.white60)),
+              trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.white54),
+              onTap: () {
+                Navigator.pop(context);
+                _launchPayPalCheckout(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showMpesaSubmitDialog(BuildContext context) {
+    final mpesaCodeController = TextEditingController();
+    final amountController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text('M-Pesa Deposit Verification', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Send M-Pesa payment to the designated till/number, then paste your M-Pesa transaction reference below for Telegram Bot review.',
+              style: TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: mpesaCodeController,
+              decoration: const InputDecoration(
+                labelText: 'M-Pesa Ref (e.g. UGFQVB4S6R)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: amountController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Amount Sent (KES)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+            onPressed: () async {
+              if (mpesaCodeController.text.isEmpty) return;
+
+              await FirebaseFirestore.instance.collection('mpesa_deposits').add({
+                'userId': user.uid,
+                'email': user.email,
+                'mpesaRef': mpesaCodeController.text.trim(),
+                'amountKes': double.tryParse(amountController.text) ?? 0.0,
+                'status': 'pending',
+                'createdAt': FieldValue.serverTimestamp(),
+              });
+
+              if (context.mounted) {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Payment submitted! Awaiting Telegram Admin approval.')),
+                );
+              }
+            },
+            child: const Text('Submit Code', style: TextStyle(color: Colors.black)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _launchPayPalCheckout(BuildContext context) async {
+    final Uri paypalUrl = Uri.parse('https://your-render-service.onrender.com/paypal/checkout?userId=${user.uid}');
+    if (await canLaunchUrl(paypalUrl)) {
+      await launchUrl(paypalUrl, mode: LaunchMode.externalApplication);
+    } else {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open PayPal endpoint.')),
         );
       }
     }
@@ -530,6 +641,15 @@ class EsimStoreTab extends StatelessWidget {
         backgroundColor: const Color(0xFF1E293B),
         actions: [
           IconButton(
+            icon: const Icon(Icons.qr_code_scanner, color: Colors.tealAccent),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const QRScannerScreen()),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.logout, color: Colors.redAccent),
             onPressed: onSignOut,
           )
@@ -553,15 +673,34 @@ class EsimStoreTab extends StatelessWidget {
                     const SizedBox(height: 8),
                     Text('\$${userBalanceUsd.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.tealAccent,
-                        foregroundColor: Colors.black,
-                        minimumSize: const Size.fromHeight(45),
-                      ),
-                      icon: const Icon(Icons.bolt),
-                      label: const Text('Stream Free Data (Tapjoy)', style: TextStyle(fontWeight: FontWeight.bold)),
-                      onPressed: onShowOfferwall,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.tealAccent,
+                              foregroundColor: Colors.black,
+                              minimumSize: const Size.fromHeight(42),
+                            ),
+                            icon: const Icon(Icons.add_card, size: 18),
+                            label: const Text('Top Up', style: TextStyle(fontWeight: FontWeight.bold)),
+                            onPressed: () => _showTopUpOptions(context),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white12,
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size.fromHeight(42),
+                            ),
+                            icon: const Icon(Icons.bolt, size: 18, color: Colors.tealAccent),
+                            label: const Text('Tapjoy', style: TextStyle(fontWeight: FontWeight.bold)),
+                            onPressed: onShowOfferwall,
+                          ),
+                        ),
+                      ],
                     )
                   ],
                 ),
@@ -570,29 +709,103 @@ class EsimStoreTab extends StatelessWidget {
             const SizedBox(height: 24),
             const Text('Available Data Packs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
             const SizedBox(height: 12),
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _esimPackages.length,
-              itemBuilder: (context, index) {
-                final package = _esimPackages[index];
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: ListTile(
-                    leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
-                    title: Text(package['title'], style: const TextStyle(color: Colors.white)),
-                    subtitle: Text('Validity: ${package['validity']}', style: const TextStyle(color: Colors.white60)),
-                    trailing: ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-                      onPressed: () => _redeemPackage(context, package),
-                      child: Text('\$${package['priceUsd'].toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
-                    ),
-                  ),
+            StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance.collection('config').doc('data_packs').collection('items').snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator(color: Colors.tealAccent));
+                }
+
+                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                  final fallbackPacks = [
+                    {'id': 'kenya-1gb-7days', 'title': 'Kenya 1 GB High-Speed Data', 'validity': '7 Days', 'priceUsd': 2.50},
+                    {'id': 'global-3gb-30days', 'title': 'Global 3 GB Roaming Data', 'validity': '30 Days', 'priceUsd': 6.00},
+                  ];
+
+                  return ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: fallbackPacks.length,
+                    itemBuilder: (context, index) {
+                      final package = fallbackPacks[index];
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: ListTile(
+                          leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
+                          title: Text(package['title'] as String, style: const TextStyle(color: Colors.white)),
+                          subtitle: Text('Validity: ${package['validity']}', style: const TextStyle(color: Colors.white60)),
+                          trailing: ElevatedButton(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                            onPressed: () => _redeemPackage(context, package),
+                            child: Text('\$${(package['priceUsd'] as double).toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                }
+
+                final docs = snapshot.data!.docs;
+
+                return ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    final data = docs[index].data() as Map<String, dynamic>;
+                    data['id'] = docs[index].id;
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: ListTile(
+                        leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
+                        title: Text(data['name'] ?? 'Data Pack', style: const TextStyle(color: Colors.white)),
+                        subtitle: Text('Validity: ${data['validityDays'] ?? 7} Days', style: const TextStyle(color: Colors.white60)),
+                        trailing: ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                          onPressed: () => _redeemPackage(context, {
+                            'id': data['id'],
+                            'priceUsd': (data['priceUsd'] ?? 0.0).toDouble(),
+                          }),
+                          child: Text('\$${(data['priceUsd'] ?? 0.0).toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
+                        ),
+                      ),
+                    );
+                  },
                 );
               },
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// QR SCANNER SCREEN
+// =============================================================================
+class QRScannerScreen extends StatelessWidget {
+  const QRScannerScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan eSIM Activation Code')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          final List<Barcode> barcodes = capture.barcodes;
+          for (final barcode in barcodes) {
+            if (barcode.rawValue != null) {
+              final String code = barcode.rawValue!;
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Scanned eSIM Code: $code')),
+              );
+              break;
+            }
+          }
+        },
       ),
     );
   }
@@ -628,7 +841,12 @@ class EarnTasksTab extends StatelessWidget {
               style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple),
               icon: const Icon(Icons.open_in_new, color: Colors.white),
               label: const Text('1. Open Link & Perform Action', style: TextStyle(color: Colors.white)),
-              onPressed: () {},
+              onPressed: () async {
+                final Uri url = Uri.parse(task['targetUrl'] ?? '');
+                if (await canLaunchUrl(url)) {
+                  await launchUrl(url, mode: LaunchMode.externalApplication);
+                }
+              },
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -702,9 +920,9 @@ class EarnTasksTab extends StatelessWidget {
                     data['platform'] == 'Instagram' ? Icons.camera_alt : Icons.video_library,
                     color: Colors.tealAccent,
                   ),
-                  title: Text('${data['platform']} Task', style: const TextStyle(color: Colors.white)),
+                  title: Text('${data['platform']} - ${data['actionType'] ?? 'Task'}', style: const TextStyle(color: Colors.white)),
                   subtitle: Text(
-                    'Earn: \$${((data['costPerUserUsd'] ?? 0.10) * 0.70).toStringAsFixed(2)} in Data',
+                    'Earn: \$${((data['costPerUserUsd'] ?? 0.008) * 0.70).toStringAsFixed(3)} in Data',
                     style: const TextStyle(color: Colors.tealAccent),
                   ),
                   trailing: ElevatedButton(
@@ -723,12 +941,13 @@ class EarnTasksTab extends StatelessWidget {
 }
 
 // =============================================================================
-// TAB 3: PROMOTE / CREATE CAMPAIGN
+// TAB 3: PROMOTE / CREATE CAMPAIGN (DYNAMIC FIRESTORE PRICING)
 // =============================================================================
 class PromoteTab extends StatefulWidget {
   final String userId;
+  final double userBalanceUsd;
 
-  const PromoteTab({super.key, required this.userId});
+  const PromoteTab({super.key, required this.userId, required this.userBalanceUsd});
 
   @override
   State<PromoteTab> createState() => _PromoteTabState();
@@ -737,21 +956,40 @@ class PromoteTab extends StatefulWidget {
 class _PromoteTabState extends State<PromoteTab> {
   final _formKey = GlobalKey<FormState>();
   String _selectedPlatform = 'Instagram';
+  String _selectedAction = 'Followers';
   String _targetUrl = '';
-  int _taskCap = 50;
-  final double _costPerUserUsd = 0.10;
+  int _quantity = 2000;
 
-  Future<void> _createCampaign() async {
-    final double totalCost = _taskCap * _costPerUserUsd;
+  final List<String> _platforms = ['Instagram', 'Facebook', 'Twitter (X)', 'TikTok', 'YouTube'];
+  final List<String> _actions = ['Followers', 'Likes', 'Comments', 'Views'];
+
+  Future<void> _createCampaign(double ratePerUnit) async {
+    final double totalCost = _quantity * ratePerUnit;
     final double appCommission = totalCost * 0.30;
     final double earnerPool = totalCost * 0.70;
+
+    if (widget.userBalanceUsd < totalCost) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Insufficient balance (\$${widget.userBalanceUsd.toStringAsFixed(2)}). Please top up.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    final userRef = FirebaseFirestore.instance.collection('users').doc(widget.userId);
+    await userRef.update({
+      'balanceUsd': FieldValue.increment(-totalCost),
+    });
 
     await FirebaseFirestore.instance.collection('campaigns').add({
       'promoterId': widget.userId,
       'platform': _selectedPlatform,
+      'actionType': _selectedAction,
       'targetUrl': _targetUrl,
-      'taskCap': _taskCap,
-      'costPerUserUsd': _costPerUserUsd,
+      'quantity': _quantity,
+      'ratePerUnit': ratePerUnit,
       'totalCost': totalCost,
       'appCommission': appCommission,
       'earnerPool': earnerPool,
@@ -761,93 +999,115 @@ class _PromoteTabState extends State<PromoteTab> {
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Campaign Published!')),
+        const SnackBar(content: Text('Campaign Published! Balance deducted.')),
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final double totalCost = _taskCap * _costPerUserUsd;
-    final double appCommission = totalCost * 0.30;
-    final double earnerPool = totalCost * 0.70;
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance.collection('config').doc('pricing').snapshots(),
+      builder: (context, snapshot) {
+        double ratePerUnit = 0.008; // Default: $16 for 2000 units
+        if (snapshot.hasData && snapshot.data!.exists) {
+          final data = snapshot.data!.data() as Map<String, dynamic>?;
+          ratePerUnit = (data?['rate_per_unit'] as num?)?.toDouble() ?? 0.008;
+        }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Create Campaign'),
-        backgroundColor: const Color(0xFF1E293B),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              DropdownButtonFormField<String>(
-                value: _selectedPlatform,
-                dropdownColor: const Color(0xFF1E293B),
-                decoration: const InputDecoration(labelText: 'Select Platform', labelStyle: TextStyle(color: Colors.white70)),
-                items: ['Instagram', 'TikTok', 'YouTube'].map((p) => DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(color: Colors.white)))).toList(),
-                onChanged: (val) => setState(() => _selectedPlatform = val!),
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                decoration: const InputDecoration(labelText: 'Target Post/Profile Link', labelStyle: TextStyle(color: Colors.white70)),
-                style: const TextStyle(color: Colors.white),
-                onChanged: (val) => _targetUrl = val,
-                validator: (val) => val == null || val.isEmpty ? 'Please enter a valid URL' : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                decoration: const InputDecoration(labelText: 'Task Cap (Number of Users Required)', labelStyle: TextStyle(color: Colors.white70)),
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: Colors.white),
-                initialValue: '50',
-                onChanged: (val) => setState(() => _taskCap = int.tryParse(val) ?? 0),
-              ),
-              const SizedBox(height: 24),
-              Card(
-                color: const Color(0xFF1E293B),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        const Text('Total Campaign Budget:', style: TextStyle(color: Colors.white70)),
-                        Text('\$${totalCost.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      ]),
-                      const Divider(color: Colors.white24),
-                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        const Text('Earner Reward Pool (70%):', style: TextStyle(color: Colors.white70)),
-                        Text('\$${earnerPool.toStringAsFixed(2)}', style: const TextStyle(color: Colors.tealAccent)),
-                      ]),
-                      const SizedBox(height: 4),
-                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        const Text('Platform Fee (30%):', style: TextStyle(color: Colors.white70)),
-                        Text('\$${appCommission.toStringAsFixed(2)}', style: const TextStyle(color: Colors.grey)),
-                      ]),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.teal,
-                  minimumSize: const Size.fromHeight(50),
-                ),
-                onPressed: () {
-                  if (_formKey.currentState!.validate()) {
-                    _createCampaign();
-                  }
-                },
-                child: const Text('Launch Campaign', style: TextStyle(color: Colors.white, fontSize: 16)),
-              )
-            ],
+        final double totalCost = _quantity * ratePerUnit;
+        final double appCommission = totalCost * 0.30;
+        final double earnerPool = totalCost * 0.70;
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Create Campaign'),
+            backgroundColor: const Color(0xFF1E293B),
           ),
-        ),
-      ),
+          body: SingleChildScrollView(
+            padding: const EdgeInsets.all(16.0),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  DropdownButtonFormField<String>(
+                    value: _selectedPlatform,
+                    dropdownColor: const Color(0xFF1E293B),
+                    decoration: const InputDecoration(labelText: 'Select Platform', labelStyle: TextStyle(color: Colors.white70)),
+                    items: _platforms.map((p) => DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(color: Colors.white)))).toList(),
+                    onChanged: (val) => setState(() => _selectedPlatform = val!),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: _selectedAction,
+                    dropdownColor: const Color(0xFF1E293B),
+                    decoration: const InputDecoration(labelText: 'Interaction Type', labelStyle: TextStyle(color: Colors.white70)),
+                    items: _actions.map((a) => DropdownMenuItem(value: a, child: Text(a, style: const TextStyle(color: Colors.white)))).toList(),
+                    onChanged: (val) => setState(() => _selectedAction = val!),
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    decoration: const InputDecoration(labelText: 'Target Post/Profile Link', labelStyle: TextStyle(color: Colors.white70)),
+                    style: const TextStyle(color: Colors.white),
+                    onChanged: (val) => _targetUrl = val,
+                    validator: (val) => val == null || val.isEmpty ? 'Please enter a valid URL' : null,
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Quantity: $_quantity', style: const TextStyle(color: Colors.white70)),
+                  Slider(
+                    value: _quantity.toDouble(),
+                    min: 100,
+                    max: 10000,
+                    divisions: 99,
+                    activeColor: Colors.tealAccent,
+                    label: '$_quantity',
+                    onChanged: (val) => setState(() => _quantity = val.toInt()),
+                  ),
+                  const SizedBox(height: 24),
+                  Card(
+                    color: const Color(0xFF1E293B),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        children: [
+                          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                            const Text('Total Campaign Budget:', style: TextStyle(color: Colors.white70)),
+                            Text('\$${totalCost.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          ]),
+                          const Divider(color: Colors.white24),
+                          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                            const Text('Earner Reward Pool (70%):', style: TextStyle(color: Colors.white70)),
+                            Text('\$${earnerPool.toStringAsFixed(2)}', style: const TextStyle(color: Colors.tealAccent)),
+                          ]),
+                          const SizedBox(height: 4),
+                          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                            const Text('Platform Fee (30%):', style: TextStyle(color: Colors.white70)),
+                            Text('\$${appCommission.toStringAsFixed(2)}', style: const TextStyle(color: Colors.grey)),
+                          ]),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      minimumSize: const Size.fromHeight(50),
+                    ),
+                    onPressed: () {
+                      if (_formKey.currentState!.validate()) {
+                        _createCampaign(ratePerUnit);
+                      }
+                    },
+                    child: const Text('Launch Campaign', style: TextStyle(color: Colors.white, fontSize: 16)),
+                  )
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
