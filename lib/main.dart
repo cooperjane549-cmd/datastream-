@@ -21,7 +21,14 @@ class AppConfig {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
+  
+  // Safe Firebase Initialization
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint("Firebase initialization error: $e");
+  }
+
   runApp(const DataStreamApp());
 }
 
@@ -104,7 +111,8 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception("Unable to verify unique device hardware ID.");
       }
 
-      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
+      final GoogleSignIn googleSignIn = GoogleSignIn();
+      final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
       if (googleUser == null) {
         setState(() => _isLoggingIn = false);
         return;
@@ -256,6 +264,7 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
   TJPlacement? _offerwallPlacement;
+  bool _isTapjoyConnected = false;
 
   @override
   void initState() {
@@ -264,20 +273,35 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 
   void _initTapjoy() {
+    final String sdkKey = Platform.isAndroid ? AppConfig.androidTapjoySdkKey : AppConfig.iosTapjoySdkKey;
+    
+    if (sdkKey.isEmpty || sdkKey.startsWith('YOUR_')) {
+      debugPrint("Tapjoy SDK Key is not configured properly.");
+      return;
+    }
+
     Tapjoy.connect(
-      sdkKey: Platform.isAndroid ? AppConfig.androidTapjoySdkKey : AppConfig.iosTapjoySdkKey,
+      sdkKey: sdkKey,
       options: {"debug": true},
       onConnectSuccess: () async {
+        debugPrint("Tapjoy Connected Successfully");
+        if (mounted) {
+          setState(() {
+            _isTapjoyConnected = true;
+          });
+        }
         await Tapjoy.setUserID(userId: widget.user.uid);
         _loadOfferwallPlacement();
       },
       onConnectFailure: (code, message) {
-        debugPrint("Tapjoy Connection Failed: $message");
+        debugPrint("Tapjoy Connection Failed: $code - $message");
       },
     );
   }
 
   void _loadOfferwallPlacement() async {
+    if (!_isTapjoyConnected) return;
+
     _offerwallPlacement = await TJPlacement.getPlacement(
       placementName: "DataStream_Offerwall",
       onRequestSuccess: (placement) {
