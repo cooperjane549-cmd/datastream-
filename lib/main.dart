@@ -15,7 +15,7 @@ import 'package:http/http.dart' as http;
 // APP CONFIGURATION
 class AppConfig {
   static const String baseUrl = 'https://datastream-backend.onrender.com';
-  static const String androidTapjoySdkKey = 'YOUR_ANDROID_TAPJOY_SDK_KEY';
+  static const String androidTapjoySdkKey = '98q-tCRlRHGFR9evTmRXSwECjZTE4O68v0xbvzcxBFssmkbmCWRBmKXSj0rw';
   static const String iosTapjoySdkKey = 'YOUR_IOS_TAPJOY_SDK_KEY';
 }
 
