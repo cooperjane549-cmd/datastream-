@@ -12,6 +12,13 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 
+// APP CONFIGURATION
+class AppConfig {
+  static const String baseUrl = 'https://datastream-backend.onrender.com';
+  static const String androidTapjoySdkKey = 'YOUR_ANDROID_TAPJOY_SDK_KEY';
+  static const String iosTapjoySdkKey = 'YOUR_IOS_TAPJOY_SDK_KEY';
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
@@ -148,7 +155,7 @@ class _LoginScreenState extends State<LoginScreen> {
         await userRef.set({
           'userId': user.uid,
           'email': user.email,
-          'displayName': user.displayName,
+          'displayName': user.displayName ?? '',
           'boundDeviceId': deviceId,
           'balanceUsd': 0.00,
           'createdAt': FieldValue.serverTimestamp(),
@@ -258,7 +265,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   void _initTapjoy() {
     Tapjoy.connect(
-      sdkKey: Platform.isAndroid ? "YOUR_ANDROID_TAPJOY_SDK_KEY" : "YOUR_IOS_TAPJOY_SDK_KEY",
+      sdkKey: Platform.isAndroid ? AppConfig.androidTapjoySdkKey : AppConfig.iosTapjoySdkKey,
       options: {"debug": true},
       onConnectSuccess: () async {
         await Tapjoy.setUserID(userId: widget.user.uid);
@@ -372,7 +379,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 }
 
 // =============================================================================
-// TAB 1: ESIM STORE & WALLET HUB (M-PESA TELEGRAM + PAYPAL + QR SCAN)
+// TAB 1: ESIM STORE & WALLET HUB
 // =============================================================================
 class EsimStoreTab extends StatelessWidget {
   final double userBalanceUsd;
@@ -389,7 +396,7 @@ class EsimStoreTab extends StatelessWidget {
   });
 
   Future<void> _redeemPackage(BuildContext context, Map<String, dynamic> package) async {
-    final double cost = package['priceUsd'];
+    final double cost = (package['priceUsd'] as num).toDouble();
 
     if (userBalanceUsd < cost) {
       showDialog(
@@ -422,7 +429,7 @@ class EsimStoreTab extends StatelessWidget {
 
     try {
       final response = await http.post(
-        Uri.parse('https://your-render-service.onrender.com/api/esim/redeem'),
+        Uri.parse('${AppConfig.baseUrl}/api/esim/redeem'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'userId': user.uid,
@@ -541,13 +548,13 @@ class EsimStoreTab extends StatelessWidget {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
             onPressed: () async {
-              if (mpesaCodeController.text.isEmpty) return;
+              if (mpesaCodeController.text.trim().isEmpty) return;
 
               await FirebaseFirestore.instance.collection('mpesa_deposits').add({
                 'userId': user.uid,
-                'email': user.email,
-                'mpesaRef': mpesaCodeController.text.trim(),
-                'amountKes': double.tryParse(amountController.text) ?? 0.0,
+                'email': user.email ?? '',
+                'mpesaRef': mpesaCodeController.text.trim().toUpperCase(),
+                'amountKes': double.tryParse(amountController.text.trim()) ?? 0.0,
                 'status': 'pending',
                 'createdAt': FieldValue.serverTimestamp(),
               });
@@ -567,7 +574,7 @@ class EsimStoreTab extends StatelessWidget {
   }
 
   Future<void> _launchPayPalCheckout(BuildContext context) async {
-    final Uri paypalUrl = Uri.parse('https://your-render-service.onrender.com/paypal/checkout?userId=${user.uid}');
+    final Uri paypalUrl = Uri.parse('${AppConfig.baseUrl}/paypal/checkout?userId=${user.uid}');
     if (await canLaunchUrl(paypalUrl)) {
       await launchUrl(paypalUrl, mode: LaunchMode.externalApplication);
     } else {
@@ -607,6 +614,12 @@ class EsimStoreTab extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
+            SelectableText(
+              lpaString,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.tealAccent, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
             const Text(
               'Scan this QR code in your device settings to activate your profile.',
               textAlign: TextAlign.center,
@@ -755,6 +768,8 @@ class EsimStoreTab extends StatelessWidget {
                     final data = docs[index].data() as Map<String, dynamic>;
                     data['id'] = docs[index].id;
 
+                    final priceUsd = (data['priceUsd'] as num?)?.toDouble() ?? 0.0;
+
                     return Card(
                       margin: const EdgeInsets.only(bottom: 12),
                       child: ListTile(
@@ -765,9 +780,9 @@ class EsimStoreTab extends StatelessWidget {
                           style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
                           onPressed: () => _redeemPackage(context, {
                             'id': data['id'],
-                            'priceUsd': (data['priceUsd'] ?? 0.0).toDouble(),
+                            'priceUsd': priceUsd,
                           }),
-                          child: Text('\$${(data['priceUsd'] ?? 0.0).toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
+                          child: Text('\$${priceUsd.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white)),
                         ),
                       ),
                     );
@@ -862,6 +877,7 @@ class EarnTasksTab extends StatelessWidget {
                 await FirebaseFirestore.instance.collection('task_submissions').add({
                   'taskId': task['id'],
                   'userId': userId,
+                  'rewardUsd': ((task['costPerUserUsd'] as num?)?.toDouble() ?? 0.008) * 0.70,
                   'status': 'pending',
                   'submittedAt': FieldValue.serverTimestamp(),
                 });
@@ -913,6 +929,8 @@ class EarnTasksTab extends StatelessWidget {
               final data = campaigns[index].data() as Map<String, dynamic>;
               data['id'] = campaigns[index].id;
 
+              final rate = (data['ratePerUnit'] as num?)?.toDouble() ?? 0.008;
+
               return Card(
                 margin: const EdgeInsets.only(bottom: 12),
                 child: ListTile(
@@ -922,7 +940,7 @@ class EarnTasksTab extends StatelessWidget {
                   ),
                   title: Text('${data['platform']} - ${data['actionType'] ?? 'Task'}', style: const TextStyle(color: Colors.white)),
                   subtitle: Text(
-                    'Earn: \$${((data['costPerUserUsd'] ?? 0.008) * 0.70).toStringAsFixed(3)} in Data',
+                    'Earn: \$${(rate * 0.70).toStringAsFixed(3)} in Data',
                     style: const TextStyle(color: Colors.tealAccent),
                   ),
                   trailing: ElevatedButton(
@@ -941,7 +959,7 @@ class EarnTasksTab extends StatelessWidget {
 }
 
 // =============================================================================
-// TAB 3: PROMOTE / CREATE CAMPAIGN (DYNAMIC FIRESTORE PRICING)
+// TAB 3: PROMOTE / CREATE CAMPAIGN
 // =============================================================================
 class PromoteTab extends StatefulWidget {
   final String userId;
@@ -1009,7 +1027,7 @@ class _PromoteTabState extends State<PromoteTab> {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance.collection('config').doc('pricing').snapshots(),
       builder: (context, snapshot) {
-        double ratePerUnit = 0.008; // Default: $16 for 2000 units
+        double ratePerUnit = 0.008;
         if (snapshot.hasData && snapshot.data!.exists) {
           final data = snapshot.data!.data() as Map<String, dynamic>?;
           ratePerUnit = (data?['rate_per_unit'] as num?)?.toDouble() ?? 0.008;
