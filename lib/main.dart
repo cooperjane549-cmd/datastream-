@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -10,6 +11,8 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import 'package:tapjoy_offerwall/tapjoy_offerwall.dart';
+import 'package:in_app_purchase/in_app_purchase.dart';
 
 // =============================================================================
 // APP CONFIGURATION
@@ -17,12 +20,43 @@ import 'package:http/http.dart' as http;
 class AppConfig {
   static const String baseUrl = 'https://datastream-backend.onrender.com';
 
-  // Placeholder until a CPA network is picked. Each network gives you an
-  // offerwall link that takes your user's ID as a query param â€” put that
-  // template here once you have it, e.g.
-  // 'https://network.example.com/offers?subid={uid}'
+  static const String androidTapjoySdkKey = '98q-tCRlRHGFR9evTmRXSwECjZTE4O68v0xbvzcxBFssmkbmCWRBmKXSj0rw';
+  static const String iosTapjoySdkKey = 'YOUR_IOS_TAPJOY_SDK_KEY';
+
+  // Fallback CPA network, used whenever Tapjoy has no content ready (e.g.
+  // while the Tapjoy account is still pending approval). Fill in once a
+  // network is picked, e.g. 'https://network.example.com/offers?subid={uid}'
   static const String offerwallUrlTemplate = '';
+
+  // How long to wait for Tapjoy content before falling back to the CPA link.
+  static const Duration tapjoyReadyTimeout = Duration(seconds: 4);
+
+  // Google Play Console "Managed Products" (consumables) — the ONLY way to
+  // add funds now. M-Pesa top-up has been removed from the app; PayHero's
+  // webhook code still exists on the backend but nothing calls it anymore.
+  //
+  // The ID strings here must match EXACTLY what you type into Play Console
+  // > Monetize > Products > In-app products. How many credits each one
+  // grants is decided by the BACKEND (server.js's IAP_PRODUCT_CREDITS map),
+  // never by this list — these are display-only, so a modified APK can't
+  // claim a cheap product bought more than it should.
+  static const List<String> iapProductIds = [
+    'credits_small',   // e.g. $1 — set its real price in Play Console
+    'credits_medium',  // e.g. $5
+    'credits_large',   // e.g. $10
+  ];
+
+  // The wallet's unit of account. Balances and pack prices are stored as an
+  // integer count of credits, where this many credits = $1 USD. This is a
+  // real exchange rate, not a display estimate — it must match the
+  // backend's CREDITS_PER_USD exactly, since both sides do this same
+  // conversion. 1000 credits/$1 gives you three decimal places of
+  // precision (1 credit = $0.001), enough for small offer payouts.
+  static const double creditsPerUsd = 1000;
 }
+
+// Formats a credit balance as a USD string, e.g. 8400 -> "$8.40".
+String formatUsd(int credits) => '\$${(credits / AppConfig.creditsPerUsd).toStringAsFixed(2)}';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -77,7 +111,7 @@ class AuthGate extends StatelessWidget {
 }
 
 // =============================================================================
-// BACKEND CLIENT â€” every call attaches the user's Firebase ID token, so the
+// BACKEND CLIENT — every call attaches the user's Firebase ID token, so the
 // server can verify who is asking (see requireUser() in server.js).
 // =============================================================================
 class BackendApi {
@@ -109,6 +143,16 @@ class BackendApi {
 
   static Future<Map<String, dynamic>> topUp({required int amountKes, required String phone}) {
     return _post('/topup', {'amountKes': amountKes, 'phone': phone});
+  }
+
+  // Sends a completed Play Billing purchase to the backend, which verifies
+  // it directly with Google's Play Developer API before crediting anything.
+  // The client's own claim about what it bought is never trusted.
+  static Future<Map<String, dynamic>> verifyIapPurchase({
+    required String productId,
+    required String purchaseToken,
+  }) {
+    return _post('/iap/verify', {'productId': productId, 'purchaseToken': purchaseToken});
   }
 
   static Future<Map<String, dynamic>> redeem({required String packId}) {
@@ -193,14 +237,16 @@ class _LoginScreenState extends State<LoginScreen> {
       final userRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
       final userSnapshot = await userRef.get();
       if (!userSnapshot.exists) {
-        // dataBalanceMb is the only balance field now. It is never written
-        // to again from the client â€” the backend ledger owns all changes.
+        // creditBalance is the wallet's only balance field — an integer
+        // count of USD-pegged credits (see AppConfig.creditsPerUsd), not a
+        // literal data amount. It is never written to again from the
+        // client — the backend ledger owns every change from here.
         await userRef.set({
           'userId': user.uid,
           'email': user.email,
           'displayName': user.displayName ?? '',
           'boundDeviceId': deviceId,
-          'dataBalanceMb': 0,
+          'creditBalance': 0,
           'createdAt': FieldValue.serverTimestamp(),
         });
       }
@@ -279,7 +325,7 @@ class _LoginScreenState extends State<LoginScreen> {
 }
 
 // =============================================================================
-// MAIN NAVIGATION â€” two tabs now: Wallet (top up / redeem) and Earn (offerwall).
+// MAIN NAVIGATION — two tabs now: Wallet (top up / redeem) and Earn (offerwall).
 // The old Promote tab (paid follows/likes/comments) has been removed.
 // =============================================================================
 class MainNavigationScreen extends StatefulWidget {
@@ -291,6 +337,66 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
+  TJPlacement? _offerwallPlacement;
+  bool _isTapjoyConnected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initTapjoy();
+  }
+
+  // Tries to bring up Tapjoy. If the key is a placeholder, or the account
+  // isn't approved yet, or the connect call fails outright, this just never
+  // sets _isTapjoyConnected — EarnTab's fallback timer handles the rest.
+  // No crash, no blocking: the CPA link still works with Tapjoy absent.
+  void _initTapjoy() {
+    final String sdkKey = Platform.isAndroid ? AppConfig.androidTapjoySdkKey : AppConfig.iosTapjoySdkKey;
+    if (sdkKey.isEmpty || sdkKey.startsWith('YOUR_')) {
+      debugPrint("Tapjoy SDK Key is not configured for this platform.");
+      return;
+    }
+
+    Tapjoy.connect(
+      sdkKey: sdkKey,
+      options: {"debug": true},
+      onConnectSuccess: () async {
+        debugPrint("Tapjoy Connected Successfully");
+        if (mounted) setState(() => _isTapjoyConnected = true);
+        await Tapjoy.setUserID(userId: widget.user.uid);
+        _loadOfferwallPlacement();
+      },
+      onConnectFailure: (code, message) {
+        debugPrint("Tapjoy Connection Failed: $code - $message");
+      },
+    );
+  }
+
+  void _loadOfferwallPlacement() async {
+    if (!_isTapjoyConnected) return;
+    _offerwallPlacement = await TJPlacement.getPlacement(
+      placementName: "DataStream_Offerwall",
+      onRequestSuccess: (placement) => debugPrint("Tapjoy: request reached servers"),
+      onRequestFailure: (placement, error) => debugPrint("Tapjoy: request failed - $error"),
+      onContentReady: (placement) => debugPrint("Tapjoy: content ready to show"),
+      onContentShow: (placement) => debugPrint("Tapjoy: content shown"),
+      onContentDismiss: (placement) => _loadOfferwallPlacement(),
+    );
+    await _offerwallPlacement?.requestContent();
+  }
+
+  // Returns true if it managed to show Tapjoy content, false if the caller
+  // should fall back to the CPA link instead.
+  Future<bool> _tryShowTapjoy() async {
+    if (!_isTapjoyConnected || _offerwallPlacement == null) return false;
+    final isReady = await _offerwallPlacement!.isContentReady();
+    if (isReady != true) {
+      await _offerwallPlacement?.requestContent();
+      return false;
+    }
+    await _offerwallPlacement!.showContent();
+    return true;
+  }
 
   Future<void> _signOut() async {
     await FirebaseAuth.instance.signOut();
@@ -302,15 +408,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance.collection('users').doc(widget.user.uid).snapshots(),
       builder: (context, snapshot) {
-        int balanceMb = 0;
+        int creditBalance = 0;
         if (snapshot.hasData && snapshot.data!.exists) {
           final data = snapshot.data!.data() as Map<String, dynamic>?;
-          balanceMb = ((data?['dataBalanceMb'] as num?) ?? 0).toInt();
+          creditBalance = ((data?['creditBalance'] as num?) ?? 0).toInt();
         }
 
         final screens = [
-          WalletTab(user: widget.user, balanceMb: balanceMb, onSignOut: _signOut),
-          EarnTab(user: widget.user),
+          WalletTab(user: widget.user, creditBalance: creditBalance, onSignOut: _signOut),
+          EarnTab(user: widget.user, tryShowTapjoy: _tryShowTapjoy),
         ];
 
         return Scaffold(
@@ -332,21 +438,22 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   }
 }
 
-// Formats MB as a readable string (e.g. 1536 -> "1.5 GB").
+// Formats a pack's nominal data size as a readable string (e.g. 1536 -> "1.5 GB").
+// Only used for display — the wallet itself holds USD-pegged credits (see formatUsd).
 String formatMb(int mb) {
   if (mb >= 1024) return '${(mb / 1024).toStringAsFixed(mb % 1024 == 0 ? 0 : 1)} GB';
   return '$mb MB';
 }
 
 // =============================================================================
-// TAB 1: WALLET â€” balance, top up (M-Pesa via backend), redeem eSIM packs
+// TAB 1: WALLET — balance, top up (M-Pesa via backend), redeem eSIM packs
 // =============================================================================
 class WalletTab extends StatefulWidget {
   final User user;
-  final int balanceMb;
+  final int creditBalance;
   final VoidCallback onSignOut;
 
-  const WalletTab({super.key, required this.user, required this.balanceMb, required this.onSignOut});
+  const WalletTab({super.key, required this.user, required this.creditBalance, required this.onSignOut});
 
   @override
   State<WalletTab> createState() => _WalletTabState();
@@ -354,18 +461,116 @@ class WalletTab extends StatefulWidget {
 
 class _WalletTabState extends State<WalletTab> {
   bool _redeeming = false;
+  String _selectedCountry = 'All';
+
+  // --- In-app purchase (worldwide payment path) ---------------------------
+  final InAppPurchase _iap = InAppPurchase.instance;
+  StreamSubscription<List<PurchaseDetails>>? _iapSub;
+  List<ProductDetails> _iapProducts = [];
+  bool _iapAvailable = false;
+  String? _verifyingPurchaseId; // productId currently being verified server-side
+
+  @override
+  void initState() {
+    super.initState();
+    _initIap();
+  }
+
+  Future<void> _initIap() async {
+    final available = await _iap.isAvailable();
+    if (!mounted) return;
+    setState(() => _iapAvailable = available);
+    if (!available) return;
+
+    // Listen for purchase results for the lifetime of this screen.
+    _iapSub = _iap.purchaseStream.listen(_onPurchaseUpdate, onError: (e) {
+      debugPrint('IAP stream error: $e');
+    });
+
+    final response = await _iap.queryProductDetails(AppConfig.iapProductIds.toSet());
+    if (response.notFoundIDs.isNotEmpty) {
+      debugPrint('IAP products not found in Play Console: ${response.notFoundIDs}');
+    }
+    if (mounted) setState(() => _iapProducts = response.productDetails);
+  }
+
+  Future<void> _onPurchaseUpdate(List<PurchaseDetails> purchases) async {
+    for (final purchase in purchases) {
+      if (purchase.status == PurchaseStatus.pending) continue;
+
+      if (purchase.status == PurchaseStatus.error) {
+        if (mounted) {
+          setState(() => _verifyingPurchaseId = null);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Purchase failed: ${purchase.error?.message ?? 'unknown error'}')),
+          );
+        }
+        continue;
+      }
+
+      if (purchase.status == PurchaseStatus.purchased || purchase.status == PurchaseStatus.restored) {
+        final token = purchase.verificationData.serverVerificationData;
+        try {
+          // The credit only happens once the BACKEND confirms this token
+          // with Google directly — this call is what actually adds MB.
+          await BackendApi.verifyIapPurchase(productId: purchase.productID, purchaseToken: token);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Purchase confirmed — credits added.')),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Could not verify purchase: ${e.toString().replaceFirst('Exception: ', '')}')),
+            );
+          }
+          // Don't complete the purchase on our side if verification failed —
+          // leaves it pending so a retry (or Play's own restore) can recover it.
+          continue;
+        }
+      }
+
+      // Consumables must be completed, or Play will refund them automatically.
+      if (purchase.pendingCompletePurchase) {
+        await _iap.completePurchase(purchase);
+      }
+      if (mounted) setState(() => _verifyingPurchaseId = null);
+    }
+  }
+
+  Future<void> _buyCredits(ProductDetails product) async {
+    setState(() => _verifyingPurchaseId = product.id);
+    final param = PurchaseParam(productDetails: product);
+    try {
+      await _iap.buyConsumable(purchaseParam: param, autoConsume: true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _verifyingPurchaseId = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not start purchase: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _iapSub?.cancel();
+    super.dispose();
+  }
 
   Future<void> _redeemPackage(Map<String, dynamic> package) async {
-    final int costMb = ((package['costMb'] as num?) ?? 0).toInt();
+    final int costCredits = ((package['costCredits'] as num?) ?? 0).toInt();
 
-    if (widget.balanceMb < costMb) {
+    if (widget.creditBalance < costCredits) {
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
           backgroundColor: const Color(0xFF1E293B),
-          title: const Text('Not Enough Data Credits', style: TextStyle(color: Colors.white)),
+          title: const Text('Not Enough Credits', style: TextStyle(color: Colors.white)),
           content: Text(
-            'You need ${formatMb(costMb)} of credits to claim this plan. Earn more or top up.',
+            'You need ${formatUsd(costCredits)} of credits to claim this plan. Earn more or buy credits.',
             style: const TextStyle(color: Colors.white70),
           ),
           actions: [
@@ -399,90 +604,6 @@ class _WalletTabState extends State<WalletTab> {
     } finally {
       if (mounted) setState(() => _redeeming = false);
     }
-  }
-
-  void _showTopUpDialog() {
-    final phoneController = TextEditingController();
-    final amountController = TextEditingController();
-    bool submitting = false;
-
-    showDialog(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF1E293B),
-          title: const Text('Top Up with M-Pesa', style: TextStyle(color: Colors.white)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: phoneController,
-                keyboardType: TextInputType.phone,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'M-Pesa Phone (07... or 01...)'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: amountController,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Amount (KES)'),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'You will get an M-Pesa prompt on your phone. Enter your PIN to complete payment.',
-                style: TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: submitting ? null : () => Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
-              onPressed: submitting
-                  ? null
-                  : () async {
-                      final amount = int.tryParse(amountController.text.trim());
-                      if (amount == null || amount <= 0 || phoneController.text.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Enter a valid phone number and amount')),
-                        );
-                        return;
-                      }
-                      setDialogState(() => submitting = true);
-                      try {
-                        final result = await BackendApi.topUp(
-                          amountKes: amount,
-                          phone: phoneController.text.trim(),
-                        );
-                        if (context.mounted) {
-                          Navigator.pop(context);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text(result['message'] as String? ?? 'Check your phone')),
-                          );
-                        }
-                      } catch (e) {
-                        setDialogState(() => submitting = false);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-                          );
-                        }
-                      }
-                    },
-              child: submitting
-                  ? const SizedBox(
-                      width: 18, height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                  : const Text('Send STK Push', style: TextStyle(color: Colors.black)),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   void _showQrModal(String lpaString) {
@@ -557,20 +678,26 @@ class _WalletTabState extends State<WalletTab> {
                   children: [
                     Text(widget.user.email ?? '', style: const TextStyle(color: Colors.white70, fontSize: 12)),
                     const SizedBox(height: 4),
-                    const Text('Data Credits Balance', style: TextStyle(color: Colors.white, fontSize: 16)),
+                    const Text('Credits Balance', style: TextStyle(color: Colors.white, fontSize: 16)),
                     const SizedBox(height: 8),
-                    Text(formatMb(widget.balanceMb),
+                    Text(formatUsd(widget.creditBalance),
                         style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${widget.creditBalance} credits — buys different amounts of data by country',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white60, fontSize: 12),
+                    ),
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.tealAccent,
                         foregroundColor: Colors.black,
-                        minimumSize: const Size.fromHeight(42),
+                        minimumSize: const Size.fromHeight(44),
                       ),
-                      icon: const Icon(Icons.add_card, size: 18),
-                      label: const Text('Top Up with M-Pesa', style: TextStyle(fontWeight: FontWeight.bold)),
-                      onPressed: _showTopUpDialog,
+                      icon: const Icon(Icons.shopping_cart, size: 18),
+                      label: const Text('Buy Credits', style: TextStyle(fontWeight: FontWeight.bold)),
+                      onPressed: _iapProducts.isEmpty ? null : _showBuyCreditsSheet,
                     ),
                   ],
                 ),
@@ -599,35 +726,143 @@ class _WalletTabState extends State<WalletTab> {
                   );
                 }
 
-                final docs = snapshot.data!.docs;
-                return ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: docs.length,
-                  itemBuilder: (context, index) {
-                    final data = docs[index].data() as Map<String, dynamic>;
-                    data['id'] = docs[index].id;
-                    final costMb = ((data['costMb'] as num?) ?? 0).toInt();
+                final allDocs = snapshot.data!.docs;
 
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      child: ListTile(
-                        leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
-                        title: Text(data['name'] ?? 'Data Pack', style: const TextStyle(color: Colors.white)),
-                        subtitle: Text('Validity: ${data['validityDays'] ?? 7} Days',
-                            style: const TextStyle(color: Colors.white60)),
-                        trailing: ElevatedButton(
-                          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-                          onPressed: _redeeming ? null : () => _redeemPackage(data),
-                          child: Text(formatMb(costMb), style: const TextStyle(color: Colors.white)),
-                        ),
+                // Build the country chip list from whatever packs exist,
+                // so adding a new country in Firestore shows up automatically.
+                final countries = <String>{'All'};
+                for (final doc in allDocs) {
+                  final c = (doc.data() as Map<String, dynamic>)['country'] as String?;
+                  if (c != null && c.isNotEmpty) countries.add(c);
+                }
+                if (!countries.contains(_selectedCountry)) _selectedCountry = 'All';
+
+                final docs = _selectedCountry == 'All'
+                    ? allDocs
+                    : allDocs
+                        .where((d) => (d.data() as Map<String, dynamic>)['country'] == _selectedCountry)
+                        .toList();
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      height: 36,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: countries.map((c) {
+                          final selected = c == _selectedCountry;
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: ChoiceChip(
+                              label: Text(c),
+                              selected: selected,
+                              onSelected: (_) => setState(() => _selectedCountry = c),
+                              backgroundColor: const Color(0xFF1E293B),
+                              selectedColor: Colors.tealAccent,
+                              labelStyle: TextStyle(color: selected ? Colors.black : Colors.white70),
+                            ),
+                          );
+                        }).toList(),
                       ),
-                    );
-                  },
+                    ),
+                    const SizedBox(height: 12),
+                    if (docs.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Text('No packs for this country yet.', style: TextStyle(color: Colors.white54)),
+                      )
+                    else
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: docs.length,
+                        itemBuilder: (context, index) {
+                          final data = docs[index].data() as Map<String, dynamic>;
+                          data['id'] = docs[index].id;
+                          final costCredits = ((data['costCredits'] as num?) ?? 0).toInt();
+                          final sizeMb = ((data['sizeMb'] as num?) ?? 0).toInt();
+
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            child: ListTile(
+                              leading: const Icon(Icons.cell_tower, color: Colors.tealAccent),
+                              title: Text(
+                                '${data['name'] ?? 'Data Pack'}${sizeMb > 0 ? ' — ${formatMb(sizeMb)}' : ''}',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                              subtitle: Text(
+                                '${data['country'] ?? 'Global'} · Validity: ${data['validityDays'] ?? 7} Days',
+                                style: const TextStyle(color: Colors.white60),
+                              ),
+                              trailing: ElevatedButton(
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                                onPressed: _redeeming ? null : () => _redeemPackage(data),
+                                child: Text(formatUsd(costCredits), style: const TextStyle(color: Colors.white)),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
                 );
               },
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showBuyCreditsSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Buy Data Credits',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+              const SizedBox(height: 4),
+              const Text('Priced in your local currency by Google Play.',
+                  style: TextStyle(color: Colors.white54, fontSize: 12)),
+              const SizedBox(height: 16),
+              ..._iapProducts.map((p) {
+                final busy = _verifyingPurchaseId == p.id;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      minimumSize: const Size.fromHeight(50),
+                    ),
+                    onPressed: busy
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            _buyCredits(p);
+                          },
+                    child: busy
+                        ? const SizedBox(
+                            width: 18, height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(p.title, style: const TextStyle(color: Colors.white)),
+                              Text(p.price, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                  ),
+                );
+              }),
+            ],
+          ),
         ),
       ),
     );
@@ -664,28 +899,53 @@ class QRScannerScreen extends StatelessWidget {
 }
 
 // =============================================================================
-// TAB 2: EARN â€” CPA/offerwall entry point.
-// This opens the offer network's page in the browser with the user's uid
-// attached, so completed offers can be matched back via the backend's
-// /postback/:network endpoint. Fill in AppConfig.offerwallUrlTemplate once
-// a network is chosen; until then this tab explains that it's coming soon.
+// TAB 2: EARN — Tapjoy first, CPA link as fallback.
+// Tapping "Open Offers" tries Tapjoy's placement immediately; if it isn't
+// ready within AppConfig.tapjoyReadyTimeout (covers "not connected", "not
+// yet approved", or "no content for this user right now"), it opens the CPA
+// network link instead, with the user's uid attached so completed offers
+// there match back via the backend's /postback/:network endpoint.
 // =============================================================================
-class EarnTab extends StatelessWidget {
+class EarnTab extends StatefulWidget {
   final User user;
-  const EarnTab({super.key, required this.user});
+  final Future<bool> Function() tryShowTapjoy;
+  const EarnTab({super.key, required this.user, required this.tryShowTapjoy});
 
-  Future<void> _openOfferwall(BuildContext context) async {
-    if (AppConfig.offerwallUrlTemplate.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Offerwall not connected yet.')),
+  @override
+  State<EarnTab> createState() => _EarnTabState();
+}
+
+class _EarnTabState extends State<EarnTab> {
+  bool _loading = false;
+
+  Future<void> _openOffers() async {
+    setState(() => _loading = true);
+    try {
+      final shownViaTapjoy = await widget.tryShowTapjoy().timeout(
+        AppConfig.tapjoyReadyTimeout,
+        onTimeout: () => false,
       );
+      if (shownViaTapjoy) return;
+      await _openCpaFallback();
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _openCpaFallback() async {
+    if (AppConfig.offerwallUrlTemplate.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No offers available right now — check back shortly.')),
+        );
+      }
       return;
     }
-    final url = AppConfig.offerwallUrlTemplate.replaceAll('{uid}', user.uid);
+    final url = AppConfig.offerwallUrlTemplate.replaceAll('{uid}', widget.user.uid);
     final uri = Uri.parse(url);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } else if (context.mounted) {
+    } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Could not open the offerwall.')),
       );
@@ -716,9 +976,13 @@ class EarnTab extends StatelessWidget {
                   foregroundColor: Colors.black,
                   minimumSize: const Size.fromHeight(48),
                 ),
-                icon: const Icon(Icons.open_in_new),
+                icon: _loading
+                    ? const SizedBox(
+                        width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                    : const Icon(Icons.open_in_new),
                 label: const Text('Open Offers', style: TextStyle(fontWeight: FontWeight.bold)),
-                onPressed: () => _openOfferwall(context),
+                onPressed: _loading ? null : _openOffers,
               ),
               const SizedBox(height: 8),
               Text('Credits usually post within a few minutes of completing an offer.',
