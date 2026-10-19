@@ -1,4 +1,4 @@
-name: Build DataStream Client APK
+name: Build DataStream Client APK + AAB
 
 on:
   push:
@@ -52,8 +52,24 @@ jobs:
             --no-tree-shake-icons \
             --android-skip-build-dependency-validation
 
+      - name: Build Android App Bundle (AAB)
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          flutter build appbundle --release \
+            --no-tree-shake-icons \
+            --android-skip-build-dependency-validation
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: datastream-client-release
+          name: datastream-client-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload AAB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: datastream-client-release-aab
+          path: build/app/outputs/bundle/release/app-release.aab
